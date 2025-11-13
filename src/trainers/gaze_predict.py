@@ -22,6 +22,7 @@ class GazeTraining(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+
         output = self.forward(x)
         loss = self.criterion(output, y)
         self.log("test_data", loss, on_epoch=True, on_step=False)
