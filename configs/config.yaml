@@ -19,6 +19,7 @@ size_y: 80
 train_sub: ['J']
 test_sub: ['K']
 grey_scale : True
+stack_length : 4
 
 # Data writer parameters
 data_writer:
