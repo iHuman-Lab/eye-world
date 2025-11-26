@@ -6,19 +6,22 @@ processed_data_path: './data/processed/'
 # Pytorch
 
 # Game data
-games: ['ms_pacman']
+games: ['breakout']
 
 # Dataset parameters
 batch_size: 32
-num_workers: 1
+num_workers: 3
 shuffle: False
 
 # Data pre-processing
-size_x: 105
-size_y: 80
+original_size: [210, 160]
+size_x: 84
+size_y: 84
 train_sub: ['J']
 test_sub: ['K']
 grey_scale : True
+stack_length : 4
+sigma: 5
 
 # Data writer parameters
 data_writer:
