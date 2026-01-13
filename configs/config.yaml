@@ -6,7 +6,7 @@ processed_data_path: './data/processed/'
 # Pytorch
 epochs: 50
 # Game data
-games: ['breakout']
+games: ['ms_pacman']
 
 # Dataset parameters
 batch_size: 32
