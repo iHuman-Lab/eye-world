@@ -20,8 +20,16 @@ size_y: 84
 train_sub: ['R']
 test_sub: ['K']
 grey_scale : True
-stack_length : 3
+stack_length : 4
 sigma: 5
+
+
+#vjepa 
+stack_size : 4
+Grey_scale_v : True
+patchx: 21
+patchy: 21
+
 
 # Data writer parameters
 data_writer:
