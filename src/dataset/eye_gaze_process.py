@@ -49,8 +49,56 @@ def gaze_points_to_density(image_shape, gaze_points, sigma, config):
 # The output should look like [n x 2], where n is the number of fixations. Each frame can have
 # any number of fixation, we do not control n.
 # We do not update fixation from previous frame, we just detect for each frame.
-def detect_fixations(gaze_locations, config):
-    raise NotImplementedError
+def detect_fixations(frame_gaze, config):
+    """
+    Detect fixations for a single frame.
+
+    Parameters
+    ----------
+    frame_gaze : list of [x, y] pairs
+        All gaze points in this frame (could be from multiple eyes/participants)
+    config : dict
+        - maxdist : maximum distance (pixels) between points in the same fixation
+        - missing : missing value marker
+
+    Returns
+    -------
+    np.ndarray [n x 2]
+        Centroids of detected fixations in this frame
+    """
+
+    maxdist = config.get("maxdist", 25)
+    missing = config.get("missing", 0.0)
+
+    # Filter missing values
+    points = np.array([p for p in frame_gaze if p[0] != missing and p[1] != missing])
+    if len(points) == 0:
+        return np.empty((0, 2))
+
+    fixations = []
+    used = set()
+
+    for i, p in enumerate(points):
+        if i in used:
+            continue
+
+        # Start new fixation cluster
+        cluster = [p]
+        used.add(i)
+
+        for j in range(i + 1, len(points)):
+            if j in used:
+                continue
+
+            if np.linalg.norm(points[j] - p) <= maxdist:
+                cluster.append(points[j])
+                used.add(j)
+
+        # Add centroid of this fixation
+        cluster = np.array(cluster)
+        fixations.append(cluster.mean(axis=0))
+
+    return np.array(fixations)
 
 
 def eye_gaze_to_density_image(image_shape, gaze_locations, config):
