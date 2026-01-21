@@ -19,9 +19,11 @@ size_x: 84
 size_y: 84
 train_sub: ['R']
 test_sub: ['K']
-grey_scale : True
-stack_length : 3
+grey_scale: True
+stack_length: 3
 sigma: 5
+use_fixation: True
+maxdist: 25
 
 # Data writer parameters
 data_writer:

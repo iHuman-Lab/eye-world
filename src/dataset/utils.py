@@ -117,8 +117,6 @@ class OnlineFixationDetector:
         self._close_fixation()
         return self.fixations
 
-    import numpy as np
-
 
 class OnlineClusterer:
     def __init__(self, maxdist=25):
