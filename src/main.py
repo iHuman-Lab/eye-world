@@ -9,7 +9,7 @@ from dataset.pre_process_jepa import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
 from models.networks import ConvNet, UNet
 from trainers.gaze_predict import GazeTraining
-from trainers.jepa_main import JEPAWrapper, LightningVJEPA
+from trainers.jepa_main import LightningVJEPA
 from utils import skip_run
 
 # The configuration file
@@ -101,19 +101,50 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     )
     trainer.fit(model)
 
+    """
+    # ----------------------------- patch_dim=patch_dim,
+    # Model
+    # -----------------------------
+    model = LightningVJEPA(
+        config=config,
+        student_patch_dim=student_patch_dim,
+        teacher_patch_dim=teacher_patch_dim,
+        embed_dim=768,
+        depth=12,
+        predictor_depth=4,
+        heads=12,
+        mlp_dim=3072,
+        mask_ratio=0.6,
+        lr=1e-4,
+        ema_decay=0.996,
+    )"""
+
+    # -----------------------------
+    # Trainer
+    # -----------------------------
+    trainer = pl.Trainer(
+        accelerator="gpu",
+        devices=1,
+        precision=16,
+        max_epochs=100,
+        logger=logger,
+        enable_progress_bar=True,
+    )
+
+    trainer.fit(model, train_dataloader)
+
 
 with skip_run("skip", "jepa_main") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
-    # -----------------------------
-    # Preprocessing
-    # -----------------------------
     preprocessor = ComposePreprocessor([Resize(config), Stack(config)])
 
     dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
+
     train_loader = dataloaders["train"]  # grab the actual DataLoader
-    jepa_dataset = JEPAWrapper(train_loader.dataset, config)
+    for x, y in train_loader:
+        print(x.shape)  # gives 32,4,84,84
 
     train_dataloader = torch.utils.data.DataLoader(
         jepa_dataset,
@@ -154,14 +185,49 @@ with skip_run("skip", "jepa_main") as check, check():
         ema_decay=0.996,
     )
 
-    """
-    # ----------------------------- patch_dim=patch_dim,
+
+with skip_run("run", "jepa_main") as check, check():
+    game = config["games"][0]
+    logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
+
+    # --------------------------------
+    # Data pipeline (THIS ALREADY WORKS)
+    # --------------------------------
+    preprocessor = ComposePreprocessor(
+        [
+            Resize(config),
+            Stack(config),
+        ]
+    )
+
+    dataloaders = get_torch_dataloaders(
+        game,
+        config,
+        preprocessor=preprocessor,
+    )
+
+    train_loader = dataloaders["train"]
+
+    # Sanity check
+    for x, y in train_loader:
+        print("Train batch shape:", x.shape)  # [32, 4, 84, 84]
+        break
+
+    # --------------------------------
+    # Patch configuration (SINGLE source of truth)
+    # --------------------------------
+    C = 1 if config.get("grey_scale_v", True) else 3
+    patchx = config["patchx"]  # 21
+    patchy = config["patchy"]  # 21
+
+    patch_dim = C * patchx * patchy  # 441
+
+    # --------------------------------
     # Model
-    # -----------------------------
+    # --------------------------------
     model = LightningVJEPA(
         config=config,
-        student_patch_dim=student_patch_dim,
-        teacher_patch_dim=teacher_patch_dim,
+        patch_dim=patch_dim,
         embed_dim=768,
         depth=12,
         predictor_depth=4,
@@ -170,31 +236,17 @@ with skip_run("skip", "jepa_main") as check, check():
         mask_ratio=0.6,
         lr=1e-4,
         ema_decay=0.996,
-    )"""
-
-    # -----------------------------
-    # Trainer
-    # -----------------------------
-    trainer = pl.Trainer(
-        accelerator="gpu",
-        devices=1,
-        precision=16,
-        max_epochs=100,
-        logger=logger,
-        enable_progress_bar=True,
     )
 
-    trainer.fit(model, train_dataloader)
+    # --------------------------------
+    # Trainer
+    # --------------------------------
+    trainer = pl.Trainer(
+        logger=logger,
+        max_epochs=config["epochs"],
+        accelerator="auto",
+        devices="auto",
+        log_every_n_steps=10,
+    )
 
-
-with skip_run("run", "jepa_main") as check, check():
-    game = config["games"][0]
-    logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
-
-    preprocessor = ComposePreprocessor([Resize(config), Stack(config)])
-
-    dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
-
-    train_loader = dataloaders["train"]  # grab the actual DataLoader
-    for x, y in train_loader:
-        print(x.shape)
+    trainer.fit(model, train_loader)

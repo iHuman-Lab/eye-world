@@ -2,52 +2,51 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from dataset.pre_process_jepa import Resize, Stack
+from kornia.contrib import compute_padding, extract_tensor_patches
 
 # from utils import extract_video_patches
 
 DEBUG = True  # <-- turn this off once things work
 
 
-class JEPAWrapper(torch.utils.data.IterableDataset):
-    def __init__(self, base_dataset, config):
-        self.base_dataset = base_dataset
-        self.config = config
-
-    def __iter__(self):
-        for sample in self.base_dataset:
-            stacked_frames, eye_gazes = sample  # preserve gaze data
-            yield stacked_frames, eye_gazes
-
-
 # -------------------------------------------------
 # Spatiotemporal Patch Extraction
 # -------------------------------------------------
-def extract_video_patches(video, a, b):
+
+
+def extract_video_patches_kornia(video, a, b, DEBUG=False):
+    """
+    video: [B, T, C, H, W]
+    returns: [B, T*N, C*a*b]
+    """
+    B, T, C, H, W = video.shape
+
+    # Merge batch and time
+    video = video.reshape(B * T, C, H, W)
+
+    stride = (a, b)
+    window_size = (a, b)
+    padding = compute_padding((H, W), window_size, stride)
+
+    patches = extract_tensor_patches(
+        video,
+        window_size=window_size,
+        stride=stride,
+        padding=padding,
+        allow_auto_padding=True,
+    )
+    # [B*T, N, C, a, b]
+
     if DEBUG:
-        print("\n[extract_video_patches]")
-        print("  input video shape:", video.shape)
+        print("patches raw:", patches.shape)
 
-    T, C, H, W = video.shape
-    assert H % a == 0 and W % b == 0, "Patch size must divide H and W"
+    patches = patches.flatten(2)  # [B*T, N, C*a*b]
+    N = patches.size(1)
 
-    patches = video.unfold(2, a, a).unfold(3, b, b)
-    # (T, C, H//a, W//b, a, b)
+    patches = patches.reshape(B, T * N, -1)
 
     if DEBUG:
-        print("  after unfold:", patches.shape)
-
-    patches = patches.permute(2, 3, 0, 1, 4, 5)
-    # (H//a, W//b, T, C, a, b)
-
-    if DEBUG:
-        print("  after permute:", patches.shape)
-
-    patches = patches.reshape(-1, T * C * a * b)
-
-    if DEBUG:
-        print("  final patches shape:", patches.shape)
+        print("final patches:", patches.shape)
 
     return patches
 
@@ -65,7 +64,7 @@ class VideoPatchEmbedding(nn.Module):
             print("\n[VideoPatchEmbedding]")
             print("  stack shape:", stack.shape)
 
-        patches = extract_video_patches(
+        patches = extract_video_patches_kornia(
             stack,
             config["patchx"],
             config["patchy"],
@@ -152,12 +151,6 @@ class LightningVJEPA(pl.LightningModule):
         self.config = config
 
         # -----------------------------
-        # Stack inside the model
-        # -----------------------------
-        self.stack_processor = Stack(config)
-        self.resize = Resize(config)
-
-        # -----------------------------
         # Modules
         # -----------------------------
         self.patch_embed = VideoPatchEmbedding(patch_dim, embed_dim)
@@ -178,60 +171,82 @@ class LightningVJEPA(pl.LightningModule):
             print("  patch_dim:", patch_dim)
             print("  embed_dim:", embed_dim)
 
-    def forward(self, img, gaze):
+    def forward(self, x):
         """
-        Forward pass with resizing + stacking + patch embedding.
+        x: [B, T, H, W]  (e.g. [32, 4, 84, 84])
+        Student sees frames t0..t(T-2)
+        Teacher sees frames t1..t(T-1)
         """
-        # Step 1: Resize and grayscale
-        resized_img, _ = self.resize((img, gaze))  # Output shape: [1, 84, 84]
+        if DEBUG:
+            print("[forward] input x:", x.shape)
 
-        # Step 2: Update the stack with the resized image
-        stacked, _ = self.stack_processor((resized_img, gaze))  # Shape: [T, 1, 84, 84]
+        B, T, H, W = x.shape
+
+        # add channel dimension (grayscale)
+        x = x.unsqueeze(2)  # [B, T, 1, H, W]
+
+        # temporal shift
+        context_frames = x[:, :-1]  # t0, t1, t2
+        target_frames = x[:, 1:]  # t1, t2, t3
 
         if DEBUG:
-            print("[forward] stacked shape:", stacked.shape)
+            print("[forward] context_frames:", context_frames.shape)
+            print("[forward] target_frames:", target_frames.shape)
 
-        # Step 3: Split stack
-        context_frames = stacked[:-1]  # all except last frame -> student sees this
-        target_frame = stacked[-1:]  # last frame -> teacher sees this
+        # patch embedding
+        context_tokens = self.patch_embed(context_frames, self.config)  # [B, Nc, D]
 
-        # Step 4: Patch embedding
-        context_tokens = self.patch_embed(context_frames, self.config)  # student input
-        target_tokens = self.patch_embed(target_frame, self.config)  # teacher input
+        target_tokens = self.patch_embed(target_frames, self.config)  # [B, Nt, D]
+
+        if DEBUG:
+            print("[forward] context_tokens:", context_tokens.shape)
+            print("[forward] target_tokens:", target_tokens.shape)
 
         return context_tokens, target_tokens
 
     # -------------------------------------------------
     def training_step(self, batch, batch_idx):
-        img, gaze = batch
+        img, _ = batch  # ignore gaze for now
 
         if DEBUG:
             print("\n==============================")
             print("[training_step] batch_idx:", batch_idx)
             print("img shape:", img.shape)
 
-        # Forward pass handles stacking internally
-        tokens = self.forward(img, gaze)
-        tokens = tokens.unsqueeze(0)  # Add batch dimension
+        # Forward
+        context_tokens, target_tokens = self.forward(img)
 
-        N = tokens.size(1)
-        device = tokens.device
+        # -----------------------------
+        # Masking (only on target)
+        # -----------------------------
+        B, Nt, D = target_tokens.shape
+        mask = random_patch_mask(Nt, self.mask_ratio, img.device)
 
-        # Masking
-        mask = random_patch_mask(N, self.mask_ratio, device)
-        context_tokens = tokens[:, ~mask]
+        student_in = context_tokens  # student sees full context
 
+        target_in = target_tokens
+        # target_in = target_tokens[:, mask, :]  # teacher predicts masked patches kept for future use with eyegaze
+
+        # -----------------------------
         # Student + predictor
-        student_repr = self.student(context_tokens)
+        # -----------------------------
+        student_repr = self.student(student_in)
         pred = self.predictor(student_repr)
 
+        # -----------------------------
         # Teacher
+        # -----------------------------
         with torch.no_grad():
-            target_tokens = tokens[:, mask]
-            target = self.teacher(target_tokens)
+            target = self.teacher(target_in)
 
+        # -----------------------------
         # Loss
-        loss = F.mse_loss(F.normalize(pred, dim=-1), F.normalize(target, dim=-1))
+        # -----------------------------
+        loss = F.mse_loss(
+            F.normalize(pred, dim=-1),
+            F.normalize(target, dim=-1),
+        )
+
         self.log("train_loss", loss, prog_bar=True)
 
         if DEBUG:
