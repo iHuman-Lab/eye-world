@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
+from sklearn.cluster import DBSCAN
 
 
 def gaze_points_to_density(image_shape, gaze_points, sigma, config):
@@ -49,23 +50,8 @@ def gaze_points_to_density(image_shape, gaze_points, sigma, config):
 # The output should look like [n x 2], where n is the number of fixations. Each frame can have
 # any number of fixation, we do not control n.
 # We do not update fixation from previous frame, we just detect for each frame.
+"""
 def detect_fixations(frame_gaze, config):
-    """
-    Detect fixations for a single frame.
-
-    Parameters
-    ----------
-    frame_gaze : list of [x, y] pairs
-        All gaze points in this frame (could be from multiple eyes/participants)
-    config : dict
-        - maxdist : maximum distance (pixels) between points in the same fixation
-        - missing : missing value marker
-
-    Returns
-    -------
-    np.ndarray [n x 2]
-        Centroids of detected fixations in this frame
-    """
 
     maxdist = config.get("maxdist", 25)
     missing = config.get("missing", 0.0)
@@ -99,6 +85,25 @@ def detect_fixations(frame_gaze, config):
         fixations.append(cluster.mean(axis=0))
 
     return np.array(fixations)
+"""
+
+
+def detect_fixations(frame_gaze, config):
+    maxdist = config.get("maxdist", 25)
+    missing = config.get("missing", 0.0)
+
+    points = np.array([p for p in frame_gaze if p[0] != missing and p[1] != missing])
+
+    if len(points) == 0:
+        return np.empty((0, 2))
+
+    # DBSCAN: eps = max distance, min_samples = 1 (match your logic)
+    labels = DBSCAN(eps=maxdist, min_samples=1).fit_predict(points)
+
+    # Compute centroids
+    fixations = np.array([points[labels == k].mean(axis=0) for k in np.unique(labels)])
+
+    return fixations
 
 
 def eye_gaze_to_density_image(image_shape, gaze_locations, config):
