@@ -24,6 +24,7 @@ stack_length: 3
 sigma: 5
 use_fixation: True
 maxdist: 25
+sampling_rate: 1000
 
 # Data writer parameters
 data_writer:

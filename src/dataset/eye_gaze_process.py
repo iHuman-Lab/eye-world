@@ -44,64 +44,53 @@ def gaze_points_to_density(image_shape, gaze_points, sigma, config):
     return density
 
 
-# TODO: Implement Fixation detection here.
-# NOTE: This function should return the fixations for a given frame. No need for a class
-# You can use some of the functions from the .utils, but the cluster is not needed.
-# The output should look like [n x 2], where n is the number of fixations. Each frame can have
-# any number of fixation, we do not control n.
-# We do not update fixation from previous frame, we just detect for each frame.
-"""
-def detect_fixations(frame_gaze, config):
+# NOTE: Verify the pipeline by training the eye-gaze predictor
+def detect_fixations(
+    frame_gaze, maxdist=25, missing=0.0, sampling_rate=60, min_duration=0.1
+):
+    """
+    Detect fixations using DBSCAN with spatial and temporal constraints.
 
-    maxdist = config.get("maxdist", 25)
-    missing = config.get("missing", 0.0)
+    Args:
+        frame_gaze: Array of (x, y) gaze points in temporal order
+        maxdist: Maximum spatial distance for clustering (pixels)
+        missing: Value indicating missing data
+        sampling_rate: Samples per second (Hz)
+        min_duration: Minimum fixation duration (seconds)
 
-    # Filter missing values
-    points = np.array([p for p in frame_gaze if p[0] != missing and p[1] != missing])
-    if len(points) == 0:
+    Returns:
+        Array of fixation centroids (x, y)
+    """
+    # Build points with indices to track time
+    valid = [
+        (i, p) for i, p in enumerate(frame_gaze) if p[0] != missing and p[1] != missing
+    ]
+
+    if len(valid) == 0:
         return np.empty((0, 2))
 
-    fixations = []
-    used = set()
+    indices, points = zip(*valid)
+    indices = np.array(indices)
+    points = np.array(points)
 
-    for i, p in enumerate(points):
-        if i in used:
-            continue
+    # Add time as 3rd dimension, scaled so 1 sample gap = maxdist
+    # This prevents clustering of spatially-close but temporally-distant points
+    time_scale = maxdist
+    times = (indices * time_scale).reshape(-1, 1)
 
-        # Start new fixation cluster
-        cluster = [p]
-        used.add(i)
+    features = np.hstack([points, times])
 
-        for j in range(i + 1, len(points)):
-            if j in used:
-                continue
+    # DBSCAN on (x, y, t) space
+    min_samples = max(1, int(min_duration * sampling_rate))
+    labels = DBSCAN(eps=maxdist, min_samples=min_samples).fit_predict(features)
 
-            if np.linalg.norm(points[j] - p) <= maxdist:
-                cluster.append(points[j])
-                used.add(j)
+    # Filter out noise (label -1) and compute centroids
+    unique_labels = [k for k in np.unique(labels) if k != -1]
 
-        # Add centroid of this fixation
-        cluster = np.array(cluster)
-        fixations.append(cluster.mean(axis=0))
-
-    return np.array(fixations)
-"""
-
-
-def detect_fixations(frame_gaze, config):
-    maxdist = config.get("maxdist", 25)
-    missing = config.get("missing", 0.0)
-
-    points = np.array([p for p in frame_gaze if p[0] != missing and p[1] != missing])
-
-    if len(points) == 0:
+    if len(unique_labels) == 0:
         return np.empty((0, 2))
 
-    # DBSCAN: eps = max distance, min_samples = 1 (match your logic)
-    labels = DBSCAN(eps=maxdist, min_samples=1).fit_predict(points)
-
-    # Compute centroids
-    fixations = np.array([points[labels == k].mean(axis=0) for k in np.unique(labels)])
+    fixations = np.array([points[labels == k].mean(axis=0) for k in unique_labels])
 
     return fixations
 
@@ -121,7 +110,13 @@ def eye_gaze_to_density_image(image_shape, gaze_locations, config):
 
     # Create a new clusterer for this frame
     if config["use_fixations"]:
-        impulses = detect_fixations(gaze_locations, config)
+        impulses = detect_fixations(
+            gaze_locations,
+            maxdist=config.get("maxdist", 25),
+            missing=config.get("missing", 0.0),
+            sampling_rate=config.get("sampling_rate", 60),
+            min_duration=config.get("min_duration", 0.1),
+        )
     else:
         impulses = gaze_locations[-1]
 
