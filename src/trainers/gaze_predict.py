@@ -18,8 +18,8 @@ class GazeTraining(pl.LightningModule):
         x, y = batch
         output = self.forward(x)
         loss = self.criterion(output, y)
-        grid = torchvision.utils.make_grid(output[0:10], normalize=True, nrow=5)
-        self.logger.experiment.add_image("predicted_train", grid, self.current_epoch)
+        # grid = torchvision.utils.make_grid(output[0:10], normalize=True, nrow=5)
+        # self.logger.experiment.add_image("predicted_train", grid, self.current_epoch)
         self.log("train_loss", loss, on_epoch=True, on_step=False, sync_dist=True)
         return loss
 

@@ -63,4 +63,5 @@ class ComposePreprocessor:
     def __call__(self, sample):
         for p in self.preprocessors:
             sample = p(sample)
+
         return sample
