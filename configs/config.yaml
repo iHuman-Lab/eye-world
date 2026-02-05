@@ -29,7 +29,7 @@ stack_size : 4
 Grey_scale_v : True
 patchx: 21
 patchy: 21
-
+use_masking: True,
 
 # Data writer parameters
 data_writer:

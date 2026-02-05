@@ -51,13 +51,18 @@ def extract_video_patches_kornia(video, a, b, DEBUG=False):
     return patches
 
 
+"would the transformer be able to tell that the tublets are a stack of patches with out specific temporial embedding"
+
+
 # -------------------------------------------------
 # Patch Embedding
 # -------------------------------------------------
 class VideoPatchEmbedding(nn.Module):
-    def __init__(self, patch_dim, embed_dim):
+    def __init__(self, patch_dim, embed_dim, max_tokens=4090):
         super().__init__()
         self.proj = nn.Linear(patch_dim, embed_dim)
+
+        self.pos = nn.Parameter(torch.randn(1, max_tokens, embed_dim))
 
     def forward(self, stack, config):
         if DEBUG:
@@ -71,6 +76,7 @@ class VideoPatchEmbedding(nn.Module):
         )
 
         tokens = self.proj(patches)
+        tokens = tokens + self.pos[:, : tokens.size(1)]
 
         if DEBUG:
             print("  embedded tokens shape:", tokens.shape)
@@ -111,7 +117,7 @@ class TransformerEncoder(nn.Module):
 # -------------------------------------------------
 # Masking
 # -------------------------------------------------
-def random_patch_mask(num_patches, mask_ratio, device):
+"""def random_patch_mask(num_patches, mask_ratio, device):
     if DEBUG:
         print("\n[random_patch_mask]")
         print("  num_patches:", num_patches)
@@ -126,6 +132,14 @@ def random_patch_mask(num_patches, mask_ratio, device):
         print("  masked patches:", mask.sum().item())
         print("  context patches:", (~mask).sum().item())
 
+    return mask"""
+
+
+def random_patch_mask(num_patches, mask_ratio, device):
+    num_mask = int(num_patches * mask_ratio)
+    perm = torch.randperm(num_patches, device=device)
+    mask = torch.zeros(num_patches, dtype=torch.bool, device=device)
+    mask[perm[:num_mask]] = True
     return mask
 
 
@@ -205,7 +219,8 @@ class LightningVJEPA(pl.LightningModule):
         return context_tokens, target_tokens
 
     # -------------------------------------------------
-    def training_step(self, batch, batch_idx):
+    """ 
+   def training_step(self, batch, batch_idx):
         img, _ = batch  # ignore gaze for now
 
         if DEBUG:
@@ -220,7 +235,17 @@ class LightningVJEPA(pl.LightningModule):
         # Masking (only on target)
         # -----------------------------
         B, Nt, D = target_tokens.shape
-        mask = random_patch_mask(Nt, self.mask_ratio, img.device)
+
+        use_masking = self.config.get("use_masking", False)
+
+        if use_masking:
+            mask = random_patch_mask(Nt, self.mask_ratio, img.device)
+
+            # keep ONLY masked target tokens
+            target_in = target_tokens[:, mask, :]
+        else:
+            mask = None
+            target_in = target_tokens
 
         student_in = context_tokens  # student sees full context
 
@@ -254,8 +279,57 @@ class LightningVJEPA(pl.LightningModule):
             print("==============================\n")
 
         return loss
+        """
 
-    # -------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        img, _ = batch
+
+        context_tokens, target_tokens = self.forward(img)
+
+        B, Nt, D = target_tokens.shape
+        use_masking = self.config.get("use_masking", False)
+
+        # -----------------------------
+        # Masking
+        # -----------------------------
+        if use_masking:
+            mask = random_patch_mask(Nt, self.mask_ratio, img.device)
+        else:
+            mask = None
+
+        # -----------------------------
+        # Student + predictor
+        # -----------------------------
+        student_repr = self.student(context_tokens)
+        pred = self.predictor(student_repr)
+
+        # align length (important even without masking)
+        pred = pred[:, :Nt, :]
+
+        if mask is not None:
+            pred = pred[:, mask, :]
+
+        # -----------------------------
+        # Teacher
+        # -----------------------------
+        with torch.no_grad():
+            target = self.teacher(target_tokens)
+            if mask is not None:
+                target = target[:, mask, :]
+
+        # -----------------------------
+        # Loss
+        # -----------------------------
+        loss = F.mse_loss(
+            F.normalize(pred, dim=-1),
+            F.normalize(target, dim=-1),
+        )
+
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    # -----------
+    # --------------------------------------
     def _init_teacher(self):
         if DEBUG:
             print("\n[Initializing teacher weights]")
