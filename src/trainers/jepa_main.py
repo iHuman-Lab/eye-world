@@ -284,46 +284,97 @@ class LightningVJEPA(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         img, _ = batch
 
-        context_tokens, target_tokens = self.forward(img)
+        if DEBUG:
+            print("\n" + "=" * 80)
+            print(f"[training_step] batch_idx: {batch_idx}")
+            print("img shape:", img.shape)
 
-        B, Nt, D = target_tokens.shape
+        # -------------------------------------------------
+        # Forward (patch embedding + temporal shift)
+        # -------------------------------------------------
+        context_tokens, target_tokens = self.forward(img)
+        B, Nt, D = context_tokens.shape
+
+        if DEBUG:
+            print("[tokens]")
+            print("  context_tokens:", context_tokens.shape)
+            print("  target_tokens :", target_tokens.shape)
+
         use_masking = self.config.get("use_masking", False)
 
-        # -----------------------------
-        # Masking
-        # -----------------------------
+        # -------------------------------------------------
+        # Mask (INDICES ONLY)
+        # -------------------------------------------------
         if use_masking:
             mask = random_patch_mask(Nt, self.mask_ratio, img.device)
+            idx = mask.nonzero(as_tuple=True)[0]
+
+            if DEBUG:
+                print("[masking]")
+                print("  use_masking:", use_masking)
+                print("  mask_ratio :", self.mask_ratio)
+                print("  masked tokens:", idx.numel(), "/", Nt)
         else:
-            mask = None
+            idx = slice(None)
+            if DEBUG:
+                print("[masking] OFF (using all tokens)")
 
-        # -----------------------------
-        # Student + predictor
-        # -----------------------------
-        student_repr = self.student(context_tokens)
-        pred = self.predictor(student_repr)
+        # -------------------------------------------------
+        # Student (FULL sequence)
+        # -------------------------------------------------
+        if DEBUG:
+            print("[student]")
+            print("  input :", context_tokens.shape)
 
-        # align length (important even without masking)
-        pred = pred[:, :Nt, :]
+        student_repr = self.student(context_tokens)  # [B, Nt, D]
 
-        if mask is not None:
-            pred = pred[:, mask, :]
+        if DEBUG:
+            print("  output:", student_repr.shape)
 
-        # -----------------------------
-        # Teacher
-        # -----------------------------
+        # -------------------------------------------------
+        # Predictor (FULL sequence)
+        # -------------------------------------------------
+        if DEBUG:
+            print("[predictor]")
+            print("  input :", student_repr.shape)
+
+        pred = self.predictor(student_repr)  # [B, Nt, D]
+
+        if DEBUG:
+            print("  output:", pred.shape)
+
+        # -------------------------------------------------
+        # Teacher (FULL sequence, NO MASK)
+        # -------------------------------------------------
         with torch.no_grad():
-            target = self.teacher(target_tokens)
-            if mask is not None:
-                target = target[:, mask, :]
+            if DEBUG:
+                print("[teacher]")
+                print("  input :", target_tokens.shape)
 
-        # -----------------------------
-        # Loss
-        # -----------------------------
+            target = self.teacher(target_tokens)  # [B, Nt, D]
+
+            if DEBUG:
+                print("  output:", target.shape)
+
+        # -------------------------------------------------
+        # Loss (MASKED INDICES ONLY)
+        # -------------------------------------------------
+        pred_sel = pred[:, idx, :]  # [B, Nm, D]
+        target_sel = target[:, idx, :]  # [B, Nm, D]
+
+        if DEBUG:
+            print("[loss]")
+            print("  pred_sel  :", pred_sel.shape)
+            print("  target_sel:", target_sel.shape)
+
         loss = F.mse_loss(
-            F.normalize(pred, dim=-1),
-            F.normalize(target, dim=-1),
+            F.normalize(pred_sel, dim=-1),
+            F.normalize(target_sel, dim=-1),
         )
+
+        if DEBUG:
+            print("  loss:", loss.item())
+            print("=" * 80)
 
         self.log("train_loss", loss, prog_bar=True)
         return loss
