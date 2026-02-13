@@ -58,25 +58,55 @@ def extract_video_patches_kornia(video, a, b, DEBUG=False):
 # Patch Embedding
 # -------------------------------------------------
 class VideoPatchEmbedding(nn.Module):
-    def __init__(self, patch_dim, embed_dim, max_tokens=4090):
+    def __init__(self, patch_dim, embed_dim, max_frames=16, max_patches=256):
         super().__init__()
+
         self.proj = nn.Linear(patch_dim, embed_dim)
 
-        self.pos = nn.Parameter(torch.randn(1, max_tokens, embed_dim))
+        # Separate spatial + temporal embeddings
+        self.spatial_pos = nn.Parameter(torch.randn(1, max_patches, embed_dim))
+        self.temporal_pos = nn.Parameter(torch.randn(1, max_frames, embed_dim))
 
     def forward(self, stack, config):
         if DEBUG:
             print("\n[VideoPatchEmbedding]")
             print("  stack shape:", stack.shape)
 
+        B, T, C, H, W = stack.shape
+
+        # -------------------------------------------------
+        # Extract patches (still flattened)
+        # -------------------------------------------------
         patches = extract_video_patches_kornia(
             stack,
             config["patchx"],
             config["patchy"],
         )
+        # [B, T*N, patch_dim]
 
-        tokens = self.proj(patches)
-        tokens = tokens + self.pos[:, : tokens.size(1)]
+        # Compute N (patches per frame)
+
+        N = patches.shape[1] // T
+
+        # -------------------------------------------------
+        # Reshape to separate time dimension
+        # -------------------------------------------------
+        patches = patches.view(B, T, N, -1)  # [B, T, N, patch_dim]
+
+        # Linear projection
+        tokens = self.proj(patches)  # [B, T, N, D]
+
+        # -------------------------------------------------
+        # Add spatial + temporal embeddings
+        # -------------------------------------------------
+        tokens = (
+            tokens
+            + self.spatial_pos[:, :N].unsqueeze(1)  # [1,1,N,D]
+            + self.temporal_pos[:, :T].unsqueeze(2)  # [1,T,1,D]
+        )
+
+        # Flatten back for transformer
+        tokens = tokens.view(B, T * N, -1)
 
         if DEBUG:
             print("  embedded tokens shape:", tokens.shape)
@@ -156,7 +186,7 @@ class LightningVJEPA(pl.LightningModule):
         predictor_depth=4,
         heads=12,
         mlp_dim=3072,
-        mask_ratio=0.6,
+        mask_ratio=0.3,
         lr=1e-4,
         ema_decay=0.996,
     ):
@@ -185,6 +215,16 @@ class LightningVJEPA(pl.LightningModule):
             print("  patch_dim:", patch_dim)
             print("  embed_dim:", embed_dim)
 
+    def _rep_stats(self, x):
+        """
+        x: [B, N, D]
+        Returns variance + norm across batch and tokens
+        """
+        return {
+            "var": x.var(dim=(0, 1)).mean(),
+            "norm": x.norm(dim=-1).mean(),
+        }
+
     def forward(self, x):
         """
         x: [B, T, H, W]  (e.g. [32, 4, 84, 84])
@@ -200,8 +240,10 @@ class LightningVJEPA(pl.LightningModule):
         x = x.unsqueeze(2)  # [B, T, 1, H, W]
 
         # temporal shift
-        context_frames = x[:, :-1]  # t0, t1, t2
-        target_frames = x[:, 1:]  # t1, t2, t3
+        # context_frames = x[:, :-1]  # t0, t1, t2
+        # target_frames = x[:, 1:]  # t1, t2, t3
+        context_frames = x  # t0, t1, t2
+        target_frames = x  # t1, t2, t3
 
         if DEBUG:
             print("[forward] context_frames:", context_frames.shape)
@@ -356,6 +398,16 @@ class LightningVJEPA(pl.LightningModule):
             if DEBUG:
                 print("  output:", target.shape)
 
+            # -------------------------------------------------
+        pred_stats = self._rep_stats(pred)
+        tgt_stats = self._rep_stats(target)
+
+        self.log("rep/pred_var", pred_stats["var"], on_epoch=True)
+        self.log("rep/tgt_var", tgt_stats["var"], on_epoch=True)
+
+        self.log("rep/pred_norm", pred_stats["norm"], on_epoch=True)
+        self.log("rep/tgt_norm", tgt_stats["norm"], on_epoch=True)
+
         # -------------------------------------------------
         # Loss (MASKED INDICES ONLY)
         # -------------------------------------------------
@@ -366,17 +418,56 @@ class LightningVJEPA(pl.LightningModule):
             print("[loss]")
             print("  pred_sel  :", pred_sel.shape)
             print("  target_sel:", target_sel.shape)
+        """
+        loss = F.l1_loss(
+            F.normalize(pred_sel, dim=-1),
+            F.normalize(target_sel, dim=-1),
+        )
 
+        
         loss = F.mse_loss(
             F.normalize(pred_sel, dim=-1),
             F.normalize(target_sel, dim=-1),
         )
+        """
+        loss = F.l1_loss(pred_sel, target_sel)
 
         if DEBUG:
             print("  loss:", loss.item())
             print("=" * 80)
 
-        self.log("train_loss", loss, prog_bar=True)
+        # -------------------------------------------------
+        # Overall loss + alignment  <<< NEW CODE
+        # -------------------------------------------------
+        self.log(
+            "loss/mse",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+        )
+
+        cos_sim = F.cosine_similarity(
+            F.normalize(pred_sel, dim=-1),
+            F.normalize(target_sel, dim=-1),
+            dim=-1,
+        ).mean()
+
+        self.log("align/cos_sim", cos_sim, on_epoch=True)
+
+        # -------------------------------------------------
+        # Student vs Teacher drift (EMA health)  <<< NEW CODE
+        # -------------------------------------------------
+        with torch.no_grad():
+            drift = 0.0
+            n = 0
+            for s, t in zip(self.student.parameters(), self.teacher.parameters()):
+                drift += (s - t).pow(2).mean()
+                n += 1
+            drift = drift / n
+
+        self.log("ema/student_teacher_mse", drift, on_epoch=True)
+
         return loss
 
     # -----------
