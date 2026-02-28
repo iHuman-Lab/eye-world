@@ -19,9 +19,12 @@ size_x: 84
 size_y: 84
 train_sub: ['R']
 test_sub: ['K']
-grey_scale : True
-stack_length : 4
+grey_scale: True
+stack_length: 3
 sigma: 5
+use_fixation: True
+maxdist: 25
+sampling_rate: 1000
 
 
 #vjepa 
