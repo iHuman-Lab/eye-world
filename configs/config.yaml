@@ -26,6 +26,16 @@ use_fixation: True
 maxdist: 25
 sampling_rate: 1000
 
+
+#vjepa 
+stack_size : 4
+Grey_scale_v : True
+patchx: 21
+patchy: 21
+use_masking: True,
+tubelet_size: 4      # number of frames per tubelet'
+
+
 # Data writer parameters
 data_writer:
   shard_write: False
