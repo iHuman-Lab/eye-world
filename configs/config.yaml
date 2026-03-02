@@ -20,7 +20,7 @@ size_y: 84
 train_sub: ['R']
 test_sub: ['K']
 grey_scale: True
-stack_length: 3
+stack_length: 4
 sigma: 5
 use_fixation: True
 maxdist: 25
