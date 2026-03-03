@@ -92,6 +92,23 @@ def extract_tubelets(video, patch_size_x, patch_size_y, tubelet_size):
     return tubelets, N_spatial
 
 
+class Predictor(nn.Module):
+    def __init__(self, dim, depth, heads, mlp_dim):
+        super().__init__()
+        layer = nn.TransformerDecoderLayer(
+            d_model=dim,
+            nhead=heads,
+            dim_feedforward=mlp_dim,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(layer, depth)
+
+    def forward(self, queries, context):
+        return self.decoder(queries, context)
+
+
 # -------------------------------------------------
 # Tubelet Embedding (Meta-style)
 # -------------------------------------------------
@@ -303,7 +320,7 @@ class LightningVJEPA(pl.LightningModule):
         self.student = TransformerEncoder(1024, depth, 16, mlp_dim)
         self.teacher = TransformerEncoder(1024, depth, 16, mlp_dim)
         self.predictor = TransformerEncoder(1024, predictor_depth, 16, mlp_dim)
-
+        self.predictor = Predictor(1024, predictor_depth, 16, mlp_dim)
         self.mask_ratio = mask_ratio
         self.lr = lr
         self.ema_decay = ema_decay
@@ -342,7 +359,7 @@ class LightningVJEPA(pl.LightningModule):
         return context_tokens, target_tokens
 
     # -------------------------------------------------
-
+    """
     def training_step(self, batch, batch_idx):
         img, _ = batch  # [B, T, H, W]
 
@@ -373,6 +390,31 @@ class LightningVJEPA(pl.LightningModule):
             print("masked tokens:", mask_bool.sum().item())
 
         B, N_full, D = context_tokens.shape
+
+        with torch.no_grad():
+            target = self.teacher(target_tokens)  # [B, N_full, D]
+
+        # Student forward
+        student_repr = self.student(student_tokens)  # [B, N_unmasked, D]
+
+        # Predictor
+        pred_masked = self.predictor(student_repr)  # [B, N_unmasked, D]
+
+        # Select masked targets directly
+        target_sel = target[mask_bool]  # [total_masked, D]
+
+        # Now IMPORTANT:
+        # You must also select predictions that correspond to masked positions.
+        # But currently predictor outputs N_unmasked tokens, not masked ones.
+
+        # So instead, compute loss against unmasked tokens:
+
+        pred_sel = pred_masked.reshape(-1, D)
+        target_visible = target[~mask_bool]
+
+        loss = F.l1_loss(pred_sel, target_visible)
+
+        B, N_full, D = context_tokens.shape
         pred_full = torch.zeros(B, N_full, D, device=context_tokens.device)
         pred_sel_list = []
         target_sel_list = []
@@ -380,31 +422,6 @@ class LightningVJEPA(pl.LightningModule):
         with torch.no_grad():
             target = self.teacher(target_tokens)
 
-        B, N_full, D = context_tokens.shape
-
-        with torch.no_grad():
-            target = self.teacher(target_tokens)  # [B, N_full, D]
-
-        # ---- Student forward (BATCHED) ----
-        student_repr = self.student(student_tokens)  # [B, N_unmasked, D]
-
-        # ---- Predictor ----
-        pred_masked = self.predictor(student_repr)  # [B, N_unmasked, D]
-
-        # ---- Reconstruct full token tensor ----
-        pred_full = torch.zeros_like(context_tokens)  # [B, N_full, D]
-
-        # Scatter masked predictions back
-        pred_full[mask_bool] = pred_masked.reshape(-1, D)
-
-        # Select masked tokens
-        pred_sel = pred_full[mask_bool]
-        target_sel = target[mask_bool]
-
-        # Loss
-        loss = F.l1_loss(pred_sel, target_sel)
-
-        """
         for b in range(B):
             mask_b = mask_bool[b]  # [N_full]
 
@@ -420,7 +437,6 @@ class LightningVJEPA(pl.LightningModule):
             # Collect masked tokens for loss
             pred_sel_list.append(pred_full[b, mask_b])
             target_sel_list.append(target[b, mask_b])
-            """
 
         # Concatenate across batch
         pred_sel = torch.cat(pred_sel_list, dim=0)
@@ -446,6 +462,131 @@ class LightningVJEPA(pl.LightningModule):
         self.log("align/cos_sim", cos_sim, on_epoch=True)
 
         # EMA drift between student and teacher
+        with torch.no_grad():
+            drift = 0.0
+            n = 0
+            for s, t in zip(self.student.parameters(), self.teacher.parameters()):
+                drift += (s - t).pow(2).mean()
+                n += 1
+            self.log("ema/student_teacher_mse", drift / n, on_epoch=True)
+
+        if DEBUG:
+            print("training_step | loss:", loss.item())
+
+        return loss
+        """
+
+    def training_step(self, batch, batch_idx):
+        img, _ = batch  # [B, T, H, W]
+
+        # ---------------------------------
+        # Tokenize video into tubelets
+        # ---------------------------------
+        context_tokens, target_tokens = self.forward(img)  # [B, N, D]
+
+        # ---------------------------------
+        # Block masking BEFORE student sees tokens
+        # ---------------------------------
+        use_masking = self.config.get("use_masking", False)
+
+        if use_masking:
+            student_tokens, mask_bool = block_mask_tubelets_vectorized(
+                context_tokens,
+                drop_ratio=self.mask_ratio,
+                block_size=self.config.get("block_size", 2),
+            )
+        else:
+            student_tokens = context_tokens
+            mask_bool = torch.zeros(
+                context_tokens.size(0),
+                context_tokens.size(1),
+                dtype=torch.bool,
+                device=img.device,
+            )
+
+        if DEBUG:
+            print("student_tokens.shape:", student_tokens.shape)
+            print("masked tokens:", mask_bool.sum().item())
+
+        # =====================================================
+        # 🔥 BATCHED TRANSFORMER VERSION (NO LOOP AROUND IT)
+        # =====================================================
+
+        B, N_full, D = context_tokens.shape
+
+        # -----------------------------
+        # Teacher (full tokens)
+        # -----------------------------
+        with torch.no_grad():
+            target_full = self.teacher(target_tokens)  # [B, N, D]
+
+        B, N, D = context_tokens.shape
+
+        # -----------------------------
+        # Student (visible only)
+        # -----------------------------
+        student_repr = self.student(student_tokens)  # [B, N_visible_max, D]
+
+        # -----------------------------
+        # Prepare masked queries per sample
+        # -----------------------------
+        pos_embed = self.tubelet_embed.pos_embed.expand(B, -1, -1)  # [B, N, D]
+
+        pred_list = []
+        target_list = []
+
+        for b in range(B):
+            mask_b = mask_bool[b]  # [N]
+            visible_b = ~mask_b
+
+            # masked queries
+            masked_pos_b = pos_embed[b][mask_b]  # [N_masked_b, D]
+
+            # student context (remove padding)
+            n_visible = visible_b.sum()
+            context_b = student_repr[b, :n_visible]  # [N_visible_b, D]
+
+            # teacher targets
+            target_b = target_full[b][mask_b]  # [N_masked_b, D]
+
+            # cross-attention predictor
+            pred_b = self.predictor(
+                masked_pos_b.unsqueeze(0),  # queries
+                context_b.unsqueeze(0),  # memory
+            ).squeeze(0)
+
+            pred_list.append(pred_b)
+            target_list.append(target_b)
+
+        pred_masked = torch.cat(pred_list, dim=0)
+        target_masked = torch.cat(target_list, dim=0)
+
+        # -----------------------------
+        # Loss
+        # -----------------------------
+        loss = F.l1_loss(pred_masked, target_masked)
+        # ---------------------------------
+        # Logging
+        # ---------------------------------
+        pred_stats = self._rep_stats(pred_masked)
+        tgt_stats = self._rep_stats(target_masked)
+
+        self.log("rep/pred_var", pred_stats["var"], on_epoch=True)
+        self.log("rep/tgt_var", tgt_stats["var"], on_epoch=True)
+        self.log("rep/pred_norm", pred_stats["norm"], on_epoch=True)
+        self.log("rep/tgt_norm", tgt_stats["norm"], on_epoch=True)
+
+        self.log("loss/l1", loss, on_step=True, on_epoch=True, prog_bar=True)
+        """
+        cos_sim = F.cosine_similarity(
+            F.normalize(pred_sel, dim=-1),
+            F.normalize(target_sel, dim=-1),
+            dim=-1,
+        ).mean()
+        
+        self.log("align/cos_sim", cos_sim, on_epoch=True)
+        """
+        # EMA drift
         with torch.no_grad():
             drift = 0.0
             n = 0
