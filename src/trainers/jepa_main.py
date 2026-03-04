@@ -92,7 +92,27 @@ def extract_tubelets(video, patch_size_x, patch_size_y, tubelet_size):
     return tubelets, N_spatial
 
 
-class Predictor(nn.Module):
+"""
+class Predictor_(nn.Module):
+    def __init__(self, dim, depth, heads, mlp_dim):
+        super().__init__()
+        layer = nn.TransformerDecoderLayer(
+            d_model=dim,
+            nhead=8,
+            dim_feedforward=mlp_dim,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(layer, depth)
+
+    def forward(self, queries, context):
+        return self.decoder(queries, context)
+
+"""
+
+
+class Predictor_(nn.Module):
     def __init__(self, dim, depth, heads, mlp_dim):
         super().__init__()
         layer = nn.TransformerDecoderLayer(
@@ -105,8 +125,19 @@ class Predictor(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(layer, depth)
 
-    def forward(self, queries, context):
-        return self.decoder(queries, context)
+    def forward(
+        self,
+        queries,
+        context,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+    ):
+        return self.decoder(
+            tgt=queries,
+            memory=context,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
 
 
 # -------------------------------------------------
@@ -294,7 +325,7 @@ class LightningVJEPA(pl.LightningModule):
         patch_dim,
         config,
         embed_dim=1024,
-        depth=12,
+        depth=10,
         predictor_depth=4,
         heads=16,
         mlp_dim=3072,
@@ -319,8 +350,10 @@ class LightningVJEPA(pl.LightningModule):
         print("Attention heads:", heads)
         self.student = TransformerEncoder(1024, depth, 16, mlp_dim)
         self.teacher = TransformerEncoder(1024, depth, 16, mlp_dim)
-        self.predictor = TransformerEncoder(1024, predictor_depth, 16, mlp_dim)
-        self.predictor = Predictor(1024, predictor_depth, 16, mlp_dim)
+
+        #
+
+        self.pred = Predictor_(1024, predictor_depth, 8, mlp_dim)
         self.mask_ratio = mask_ratio
         self.lr = lr
         self.ema_decay = ema_decay
@@ -359,109 +392,104 @@ class LightningVJEPA(pl.LightningModule):
         return context_tokens, target_tokens
 
     # -------------------------------------------------
-    """
+
     def training_step(self, batch, batch_idx):
         img, _ = batch  # [B, T, H, W]
 
+        # ---------------------------------
         # Tokenize video into tubelets
+        # ---------------------------------
         context_tokens, target_tokens = self.forward(img)  # [B, N, D]
 
-        # -------------------------------
-        # Block masking BEFORE student sees tokens
-        # -------------------------------
+        B, N, D = context_tokens.shape
+
+        # ---------------------------------
+        # Block masking (mask only, DO NOT slice tokens)
+        # ---------------------------------
         use_masking = self.config.get("use_masking", False)
+
         if use_masking:
-            student_tokens, mask_bool = block_mask_tubelets_vectorized(
+            _, mask_bool = block_mask_tubelets_vectorized(
                 context_tokens,
                 drop_ratio=self.mask_ratio,
                 block_size=self.config.get("block_size", 2),
             )
         else:
-            student_tokens = context_tokens
             mask_bool = torch.zeros(
-                context_tokens.size(0),
-                context_tokens.size(1),
+                B,
+                N,
                 dtype=torch.bool,
                 device=img.device,
             )
 
-        if DEBUG:
-            print("student_tokens.shape:", student_tokens.shape)
-            print("masked tokens:", mask_bool.sum().item())
+        # Safety check (avoid empty loss)
+        if mask_bool.sum() == 0:
+            return torch.tensor(0.0, device=img.device, requires_grad=True)
 
-        B, N_full, D = context_tokens.shape
-
+        # =====================================================
+        # Teacher (full tokens)
+        # =====================================================
         with torch.no_grad():
-            target = self.teacher(target_tokens)  # [B, N_full, D]
+            target_full = self.teacher(target_tokens)  # [B, N, D]
 
-        # Student forward
-        student_repr = self.student(student_tokens)  # [B, N_unmasked, D]
+        # =====================================================
+        # Student (full tokens)
+        # =====================================================
+        student_repr = self.student(context_tokens)  # [B, N, D]
 
-        # Predictor
-        pred_masked = self.predictor(student_repr)  # [B, N_unmasked, D]
+        # =====================================================
+        # Positional embeddings (queries)
+        # =====================================================
+        pos_embed = self.tubelet_embed.pos_embed.expand(B, -1, -1)  # [B, N, D]
 
-        # Select masked targets directly
-        target_sel = target[mask_bool]  # [total_masked, D]
+        # =====================================================
+        # Mask handling for TransformerDecoder
+        # =====================================================
 
-        # Now IMPORTANT:
-        # You must also select predictions that correspond to masked positions.
-        # But currently predictor outputs N_unmasked tokens, not masked ones.
+        # PyTorch convention:
+        # True = ignore token
 
-        # So instead, compute loss against unmasked tokens:
+        # We want:
+        # - Decoder should compute outputs only for masked tokens
+        # - Cross-attention should attend only to visible tokens
 
-        pred_sel = pred_masked.reshape(-1, D)
-        target_visible = target[~mask_bool]
+        tgt_key_padding_mask = ~mask_bool  # Ignore unmasked tokens
+        memory_key_padding_mask = mask_bool  # Ignore masked tokens in memory
 
-        loss = F.l1_loss(pred_sel, target_visible)
+        # =====================================================
+        # Single batched predictor call
+        # =====================================================
+        pred_full = self.pred(
+            queries=pos_embed,  # [B, N, D]
+            context=student_repr,  # [B, N, D]
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )  # -> [B, N, D]
 
-        B, N_full, D = context_tokens.shape
-        pred_full = torch.zeros(B, N_full, D, device=context_tokens.device)
-        pred_sel_list = []
-        target_sel_list = []
+        # =====================================================
+        # Compute loss only on masked tokens
+        # =====================================================
+        pred_masked = pred_full[mask_bool]  # [Total_masked, D]
+        target_masked = target_full[mask_bool]  # [Total_masked, D]
 
-        with torch.no_grad():
-            target = self.teacher(target_tokens)
+        loss = F.l1_loss(pred_masked, target_masked)
 
-        for b in range(B):
-            mask_b = mask_bool[b]  # [N_full]
-
-            # Student forward (already only unmasked tokens)
-            student_repr_b = self.student(
-                student_tokens[b].unsqueeze(0)
-            )  # [1, N_unmasked, D]
-
-            # Predictor reconstructs masked tokens
-            pred_masked_b = self.predictor(student_repr_b)  # [num_masked, D]
-            pred_full[b, mask_b] = pred_masked_b.squeeze(0)
-
-            # Collect masked tokens for loss
-            pred_sel_list.append(pred_full[b, mask_b])
-            target_sel_list.append(target[b, mask_b])
-
-        # Concatenate across batch
-        pred_sel = torch.cat(pred_sel_list, dim=0)
-        target_sel = torch.cat(target_sel_list, dim=0)
-
-        # Compute loss
-        loss = F.l1_loss(pred_sel, target_sel)
-        # -------------------------------
+        # ---------------------------------
         # Logging
-        # -------------------------------
-        pred_stats = self._rep_stats(pred_full)
-        tgt_stats = self._rep_stats(target)
+        # ---------------------------------
+        pred_stats = self._rep_stats(pred_masked)
+        tgt_stats = self._rep_stats(target_masked)
+
         self.log("rep/pred_var", pred_stats["var"], on_epoch=True)
         self.log("rep/tgt_var", tgt_stats["var"], on_epoch=True)
         self.log("rep/pred_norm", pred_stats["norm"], on_epoch=True)
         self.log("rep/tgt_norm", tgt_stats["norm"], on_epoch=True)
+
         self.log("loss/l1", loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        # Cosine similarity for masked tokens
-        cos_sim = F.cosine_similarity(
-            F.normalize(pred_sel, dim=-1), F.normalize(target_sel, dim=-1), dim=-1
-        ).mean()
-        self.log("align/cos_sim", cos_sim, on_epoch=True)
-
-        # EMA drift between student and teacher
+        # ---------------------------------
+        # EMA drift logging
+        # ---------------------------------
         with torch.no_grad():
             drift = 0.0
             n = 0
@@ -470,12 +498,9 @@ class LightningVJEPA(pl.LightningModule):
                 n += 1
             self.log("ema/student_teacher_mse", drift / n, on_epoch=True)
 
-        if DEBUG:
-            print("training_step | loss:", loss.item())
-
         return loss
-        """
 
+        '''
     def training_step(self, batch, batch_idx):
         img, _ = batch  # [B, T, H, W]
 
@@ -599,6 +624,7 @@ class LightningVJEPA(pl.LightningModule):
             print("training_step | loss:", loss.item())
 
         return loss
+        '''
 
     # -------------------------------------------------
 
@@ -624,7 +650,7 @@ class LightningVJEPA(pl.LightningModule):
         return torch.optim.AdamW(
             list(self.tubelet_embed.parameters())
             + list(self.student.parameters())
-            + list(self.predictor.parameters()),
+            + list(self.pred.parameters()),
             lr=self.lr,
             weight_decay=1e-4,
         )
