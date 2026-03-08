@@ -7,6 +7,7 @@ from data.data_write import eye_gaze_to_webdataset
 from dataset.pre_process_jepa import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
 from models.networks import ConvNet, UNet
+from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
 from trainers.gaze_predict import GazeTraining
 from trainers.jepa import VJEPA
 from utils import skip_run
@@ -115,14 +116,24 @@ with skip_run("run", "jepa_training") as check, check():
         break
 
     patch_dim = 1 if config.get("grey_scale_v", True) else 3
-    model = VJEPA(
+    embed_dim = 768
+    heads = 12
+    mlp_dim = 3072
+
+    tubelet_embed = TubeletEmbedding(
         config=config,
         patch_dim=patch_dim,
-        embed_dim=768,
-        depth=12,
-        predictor_depth=4,
-        heads=12,
-        mlp_dim=3072,
+        embed_dim=embed_dim,
+        img_size=config.get("size_x", 84),
+    )
+    student = TransformerEncoder(embed_dim, depth=12, heads=heads, mlp_dim=mlp_dim)
+    net = VJEPAEncoder(tubelet_embed=tubelet_embed, student=student)
+
+    pred = Predictor(embed_dim, depth=4, heads=heads // 2, mlp_dim=mlp_dim)
+    model = VJEPA(
+        model=net,
+        pred=pred,
+        config=config,
         mask_ratio=0.6,
         lr=1e-4,
         ema_decay=0.996,

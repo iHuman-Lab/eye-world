@@ -1,9 +1,30 @@
+import copy
+
 import torch.nn as nn
 from kornia.contrib import compute_padding, extract_tensor_patches
 
 from models.utils import get_3d_sincos_pos_embed
 
 DEBUG = False  # set True for debugging
+
+
+# -------------------------------------------------
+# VJEPA Encoder — inference model (tubelet embed + student)
+# -------------------------------------------------
+class VJEPAEncoder(nn.Module):
+    def __init__(self, tubelet_embed, student):
+        super().__init__()
+        self.tubelet_embed = tubelet_embed
+        self.student = student
+
+    def forward(self, video):
+        """
+        video: [B, T, H, W]
+        returns: [B, N, D] — patch representations
+        """
+        x = video.unsqueeze(2)  # [B, T, 1, H, W]
+        tokens = self.tubelet_embed(x)  # [B, N, D]
+        return self.student(tokens)  # [B, N, D]
 
 
 # -------------------------------------------------
