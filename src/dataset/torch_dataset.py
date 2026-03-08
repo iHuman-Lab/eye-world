@@ -6,7 +6,12 @@ from .utils import get_train_test_files
 
 def read_webdataset(file_list, config):
     dataset = (
-        wds.WebDataset(file_list, shardshuffle=False)
+        wds.WebDataset(
+            file_list,
+            shardshuffle=False,
+            nodesplitter=wds.split_by_worker,
+            empty_check=False,
+        )
         .decode("pil")
         .to_tuple("jpg", "json")
     )

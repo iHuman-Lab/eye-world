@@ -4,21 +4,35 @@ meta_data_path: './data/raw/meta_data.csv'
 processed_data_path: './data/processed/'
 
 # Pytorch
-
+epochs: 50
 # Game data
 games: ['breakout']
 
 # Dataset parameters
 batch_size: 32
-num_workers: 1
+num_workers: 3
 shuffle: False
 
 # Data pre-processing
-size_x: 105
-size_y: 80
-train_sub: ['J']
+original_size: [210, 160]
+size_x: 84
+size_y: 84
+train_sub: ['R']
 test_sub: ['K']
-grey_scale : True
+grey_scale: True
+stack_length: 4
+sigma: 5
+use_fixation: True
+maxdist: 25
+sampling_rate: 1000
+
+#vjepa
+stack_size: 4
+Grey_scale_v: True
+patchx: 21
+patchy: 21
+use_masking: True,
+tubelet_size: 4 # number of frames per tubelet'
 
 # Data writer parameters
 data_writer:
