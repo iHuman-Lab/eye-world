@@ -1,5 +1,3 @@
-import copy
-
 import torch.nn as nn
 from kornia.contrib import compute_padding, extract_tensor_patches
 
@@ -141,3 +139,35 @@ class Predictor(nn.Module):
         returns: [B, N_masked, D]
         """
         return self.decoder(tgt=queries, memory=context)
+
+    #################################################################################33
+    ###########ACTION TOKEN CREATOR #################################################3
+    ##################################################################################
+
+
+class ActionToken(nn.Module):
+    def __init__(self, token_dim=1024):
+        super().__init__()
+        # Example MLP: 1 → 128 → 512 → 1024
+        self.mlp = nn.Sequential(
+            nn.Linear(1, 128),
+            nn.ReLU(),
+            nn.Linear(128, 512),
+            nn.ReLU(),
+            nn.Linear(512, token_dim),
+        )
+
+    def forward(self, action):
+        """
+        action: [B, T] or [B] (scalar action)
+        returns: [B, T, token_dim] or [B, token_dim]
+        """
+        # Ensure action has a last dimension
+        if action.dim() == 1:
+            action = action.unsqueeze(-1)  # [B, 1]
+        elif action.dim() == 2:
+            action = action.unsqueeze(-1)  # [B, T, 1]
+
+        token = self.mlp(action)  # [B, 1, 1024] or [B, T, 1024]
+
+        return token

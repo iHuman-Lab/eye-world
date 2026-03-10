@@ -413,8 +413,8 @@ class ActionConditionVJEPA(pl.LightningModule):
     def __init__(
         self,
         model,
+        action_embed,
         config,
-        ckpt_path,
         latent_pred_dim=None,
         num_visible_frames=4,
         lr=1e-4,
@@ -441,10 +441,7 @@ class ActionConditionVJEPA(pl.LightningModule):
             p.requires_grad = False
 
         # Action embedding
-        action_dim = config["action_dim"]
-        self.action_embed = nn.Linear(
-            action_dim, model.student.encoder.layers[0].self_attn.embed_dim
-        )
+        self.action_embed = action_embed
 
         # Autoregressive latent predictor (causal transformer)
         D = model.student.encoder.layers[0].self_attn.embed_dim
@@ -461,6 +458,7 @@ class ActionConditionVJEPA(pl.LightningModule):
         # ----------------------------
         # Load pretrained checkpoint
         # ----------------------------
+        ckpt_path = config["ckpt_path"]
         ckpt = torch.load(ckpt_path, map_location="cpu")
         sd = ckpt["state_dict"]
 
@@ -492,26 +490,31 @@ class ActionConditionVJEPA(pl.LightningModule):
         self.update_teacher()
 
     def training_step(self, batch, batch_idx):
-        img, actions = batch  # img: [B, T, H, W], actions: [B, T, A_dim]
-        B, T, H, W = img.shape
-        D = self.model.student.encoder.layers[0].self_attn.embed_dim
+        # img, actions = batch  # img: [B, T, H, W], actions: [B, T, A_dim]
+        img, _ = batch
+        # B, T, H, W = img.shape
+        # B = img.shape[0]
+        # T = img.shape[1]
 
+        img = torch.stack(img) if isinstance(img, list) else img
+
+        B, T, H, W = img.shape
+
+        D = self.model.student.encoder.layers[0].self_attn.embed_dim
+        a = torch.randn(B, T, device=img.device)
         # -------------------------------
         # Tubelet Embedding
         # -------------------------------
         x = img.unsqueeze(2)  # [B, T, 1, H, W]
         all_tokens = self.model.tubelet_embed(x)  # [B, N, D]
         tokens_per_frame = all_tokens.size(1) // T
+        action_emb = self.action_embed(a)
 
-        # Mean pool tokens per frame to get a single latent per frame
-        frame_latents = all_tokens.reshape(B, T, tokens_per_frame, D).mean(
-            dim=2
-        )  # [B, T, D]
+        B, N, D = all_tokens.shape
+        all_tokens = self.model.student.encoder(all_tokens)  # [B, N, D]
 
-        # -------------------------------
-        # Action Embedding
-        # -------------------------------
-        action_emb = self.action_embed(actions)  # [B, T, D]
+        tokens_per_frame = N // T
+        frame_latents = all_tokens.reshape(B, T, tokens_per_frame, D).mean(dim=2)
 
         # -------------------------------
         # Build Causal Sequence [z0,a0,z1,a1,...]
@@ -548,9 +551,7 @@ class ActionConditionVJEPA(pl.LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
-            list(self.model.tubelet_embed.parameters())
-            + list(self.model.student.parameters())
-            + list(self.latent_predictor.parameters())
+            list(self.latent_predictor.parameters())
             + list(self.action_embed.parameters()),
             lr=self.lr,
             weight_decay=1e-4,

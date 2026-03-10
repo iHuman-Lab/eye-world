@@ -1,12 +1,19 @@
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import yaml
+from lightning.pytorch.loggers import TensorBoardLogger
+
 from data.data_write import create_webdataset
 from dataset.pre_process_jepa import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
-from lightning.pytorch.loggers import TensorBoardLogger
 from models.networks import ConvNet, UNet
-from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
+from models.vjepa import (
+    ActionToken,
+    Predictor,
+    TransformerEncoder,
+    TubeletEmbedding,
+    VJEPAEncoder,
+)
 from trainers.gaze_predict import GazeTraining
 from trainers.jepa import VJEPA, ActionConditionVJEPA
 from utils import skip_run
@@ -101,7 +108,7 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     trainer.fit(model)
 
 
-with skip_run("skip", "jepa_training") as check, check():
+with skip_run("run", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -115,8 +122,8 @@ with skip_run("skip", "jepa_training") as check, check():
         break
 
     patch_dim = 1 if config.get("grey_scale_v", True) else 3
-    embed_dim = 768
-    heads = 12
+    embed_dim = 1024
+    heads = 8
     mlp_dim = 3072
 
     tubelet_embed = TubeletEmbedding(
@@ -150,7 +157,7 @@ with skip_run("skip", "jepa_training") as check, check():
     trainer.fit(model, train_loader)
 
 
-with skip_run("run", "jepa_training") as check, check():
+with skip_run("skip", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -164,9 +171,9 @@ with skip_run("run", "jepa_training") as check, check():
         break
 
     patch_dim = 1 if config.get("grey_scale_v", True) else 3
-    embed_dim = 768
-    heads = 12
-    mlp_dim = 3072
+    embed_dim = 1024
+    heads = 8
+    mlp_dim = 2048
 
     tubelet_embed = TubeletEmbedding(
         config=config,
@@ -176,13 +183,12 @@ with skip_run("run", "jepa_training") as check, check():
     )
     student = TransformerEncoder(embed_dim, depth=12, heads=heads, mlp_dim=mlp_dim)
     net = VJEPAEncoder(tubelet_embed=tubelet_embed, student=student)
-
-    pred = Predictor(embed_dim, depth=4, heads=heads // 2, mlp_dim=mlp_dim)
+    action_embed = ActionToken()
+    predd = Predictor(embed_dim, depth=4, heads=heads // 2, mlp_dim=mlp_dim)
     model = ActionConditionVJEPA(
         model=net,
-        pred=pred,
+        action_embed=action_embed,
         config=config,
-        mask_ratio=0.6,
         lr=1e-4,
         ema_decay=0.996,
     )
