@@ -3,10 +3,12 @@ raw_data_path: './data/raw/'
 meta_data_path: './data/raw/meta_data.csv'
 processed_data_path: './data/processed/'
 
+ckpt_path : './tb_logs/ms_pacman/vjepa_world_model/version_2/checkpoints/epoch=49-step=138850.ckpt'
+
 # Pytorch
 epochs: 50
 # Game data
-games: ['breakout']
+games: ['ms_pacman']
 
 # Dataset parameters
 batch_size: 32
@@ -31,9 +33,9 @@ stack_size: 4
 Grey_scale_v: True
 patchx: 21
 patchy: 21
-use_masking: True,
+use_masking: True
 tubelet_size: 4 # number of frames per tubelet'
-
+get_actions : True
 # Data writer parameters
 data_writer:
   shard_write: False

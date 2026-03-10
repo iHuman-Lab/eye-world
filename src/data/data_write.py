@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from .tar_writer import WebDatasetWriter
 
@@ -23,6 +24,7 @@ def read_bz2_file(file_path: Path):
     return None
 
 
+"""
 def read_gaze_data(file_path):
     # Now read the whole file as raw text to get the gaze part
     gaze_data = []
@@ -42,6 +44,34 @@ def read_gaze_data(file_path):
     # Add gaze column to dataframe
     return gaze_data
 
+"""
+
+
+def read_gaze_data(file_path):
+    gaze_data = []
+    actions = []
+
+    with open(file_path, "r") as f:
+        next(f)  # skip header
+        for line in f:
+            parts = line.strip().split(",")
+
+            # Column 5 is action
+            actions.append(int(parts[5]))
+
+            try:
+                gaze_floats = list(map(float, parts[6:]))
+            except ValueError:
+                gaze_floats = [-1, -1]
+
+            gaze_points = [
+                [gaze_floats[i], gaze_floats[i + 1]]
+                for i in range(0, len(gaze_floats), 2)
+            ]
+            gaze_data.append(gaze_points)
+
+    return gaze_data, actions
+
 
 def extract_frame_number(member):
     """
@@ -52,7 +82,9 @@ def extract_frame_number(member):
     return int(match.group(1)) if match else 0
 
 
-def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> None:
+def extract_images_and_write_to_webdataset(
+    tar_bz2_file, writer, eye_gaze, actions
+) -> None:
     """
     Decompresses the .tar.bz2 file, extracts PNG images, and writes them to a WebDataset tar file.
     Sorts files based on the numeric part of the filename (e.g., JAW_3117023_17135.png → 17135).
@@ -60,7 +92,8 @@ def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> No
     decompressed_data = read_bz2_file(tar_bz2_file)
     if decompressed_data is None:
         return
-
+    config_path = "configs/config.yaml"
+    config = yaml.load(open(str(config_path)), Loader=yaml.SafeLoader)
     tar_bytes = BytesIO(decompressed_data)
 
     with tarfile.open(fileobj=tar_bytes, mode="r:") as tar:
@@ -73,6 +106,7 @@ def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> No
             key=extract_frame_number,
         )
         # NOTE: The first member of tar (num=0) file is the info. So the images start from num=1
+
         for idx, member in enumerate(members, start=1):
             file_data = tar.extractfile(member).read()
             try:
@@ -80,6 +114,7 @@ def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> No
                     "__key__": str(idx - 1),
                     "jpg": file_data,
                     "json": eye_gaze[idx - 1],
+                    "action.cls": actions[idx],
                 }
                 writer.write(sample)
             except (ValueError, IndexError):

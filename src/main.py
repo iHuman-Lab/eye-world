@@ -9,7 +9,7 @@ from dataset.torch_dataset import get_torch_dataloaders
 from models.networks import ConvNet, UNet
 from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
 from trainers.gaze_predict import GazeTraining
-from trainers.jepa import VJEPA
+from trainers.jepa import VJEPA, ActionConditionVJEPA
 from utils import skip_run
 
 # The configuration file
@@ -102,7 +102,7 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     trainer.fit(model)
 
 
-with skip_run("run", "jepa_training") as check, check():
+with skip_run("skip", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -131,6 +131,55 @@ with skip_run("run", "jepa_training") as check, check():
 
     pred = Predictor(embed_dim, depth=4, heads=heads // 2, mlp_dim=mlp_dim)
     model = VJEPA(
+        model=net,
+        pred=pred,
+        config=config,
+        mask_ratio=0.6,
+        lr=1e-4,
+        ema_decay=0.996,
+    )
+
+    trainer = pl.Trainer(
+        logger=logger,
+        max_epochs=config["epochs"],
+        accelerator="auto",
+        devices="auto",
+        precision="bf16-mixed",
+        log_every_n_steps=10,
+    )
+
+    trainer.fit(model, train_loader)
+
+
+with skip_run("run", "jepa_training") as check, check():
+    game = config["games"][0]
+    logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
+
+    preprocessor = ComposePreprocessor([Resize(config), Stack(config)])
+
+    dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
+    train_loader = dataloaders["train"]
+
+    for x, y in train_loader:
+        print("Train batch shape:", x.shape)  # [32, 4, 84, 84]
+        break
+
+    patch_dim = 1 if config.get("grey_scale_v", True) else 3
+    embed_dim = 768
+    heads = 12
+    mlp_dim = 3072
+
+    tubelet_embed = TubeletEmbedding(
+        config=config,
+        patch_dim=patch_dim,
+        embed_dim=embed_dim,
+        img_size=config.get("size_x", 84),
+    )
+    student = TransformerEncoder(embed_dim, depth=12, heads=heads, mlp_dim=mlp_dim)
+    net = VJEPAEncoder(tubelet_embed=tubelet_embed, student=student)
+
+    pred = Predictor(embed_dim, depth=4, heads=heads // 2, mlp_dim=mlp_dim)
+    model = ActionConditionVJEPA(
         model=net,
         pred=pred,
         config=config,
