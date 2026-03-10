@@ -1,11 +1,10 @@
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import yaml
-from lightning.pytorch.loggers import TensorBoardLogger
-
-from data.data_write import eye_gaze_to_webdataset
+from data.data_write import create_webdataset
 from dataset.pre_process_jepa import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
+from lightning.pytorch.loggers import TensorBoardLogger
 from models.networks import ConvNet, UNet
 from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
 from trainers.gaze_predict import GazeTraining
@@ -19,7 +18,7 @@ config = yaml.load(open(str(config_path)), Loader=yaml.SafeLoader)
 
 with skip_run("skip", "data_cleaning") as check, check():
     for game in config["games"]:
-        eye_gaze_to_webdataset(game, config)
+        create_webdataset(game, config)
 
 
 with skip_run("skip", "torch_dataset") as check, check():
