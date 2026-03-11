@@ -33,7 +33,9 @@ def read_gaze_action_data(file_path):
             parts = line.strip().split(",")
 
             # Column 5 is action
-            actions.append(int(parts[5]))
+            actions.append(
+                int(parts[5]) if len(parts) > 5 and parts[5] not in ("", "null") else 0
+            )
             try:
                 gaze_floats = list(map(float, parts[6:]))
             except ValueError:
@@ -82,23 +84,11 @@ def write_to_webdataset(tar_bz2_file, writer, eye_gaze, actions) -> None:
                     "__key__": str(idx - 1),
                     "jpg": file_data,
                     "json": eye_gaze[idx - 1],
-<<<<<<< HEAD
                     "action.cls": actions[idx - 1],
-=======
->>>>>>> 8664ef4 (zombie stop)
                 }
                 writer.write(sample)
             except (ValueError, IndexError):
                 print(f"Incorrect data format or mismatch for {member.name}")
-
-
-"""
-                sample = {
-                    "__key__": str(idx - 1),
-                    "jpg": file_data,
-                    "json": eye_gaze[idx - 1],
-                    "action.cls": actions[idx],
-                }"""
 
 
 def get_game_meta_data(game: str, config: dict) -> pd.DataFrame:

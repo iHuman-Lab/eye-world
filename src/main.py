@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
+import torch
 import yaml
 from lightning.pytorch.loggers import TensorBoardLogger
 
@@ -23,7 +24,7 @@ config_path = "configs/config.yaml"
 config = yaml.load(open(str(config_path)), Loader=yaml.SafeLoader)
 
 
-with skip_run("skip", "data_cleaning") as check, check():
+with skip_run("run", "data_cleaning") as check, check():
     for game in config["games"]:
         create_webdataset(game, config)
 
@@ -108,7 +109,7 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     trainer.fit(model)
 
 
-with skip_run("run", "jepa_training") as check, check():
+with skip_run("skip", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -157,7 +158,7 @@ with skip_run("run", "jepa_training") as check, check():
     trainer.fit(model, train_loader)
 
 
-with skip_run("skip", "jepa_training") as check, check():
+with skip_run("skip", "jepa_action_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -165,6 +166,11 @@ with skip_run("skip", "jepa_training") as check, check():
 
     dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
     train_loader = dataloaders["train"]
+
+    ckpt_path = "/home/cody/Documents/IHL/eye-world/tb_logs/ms_pacman/vjepa_world_model/version_2/checkpoints/epoch=49-step=138850.ckpt"
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state_dict = ckpt["state_dict"]
 
     for x, y in train_loader:
         print("Train batch shape:", x.shape)  # [32, 4, 84, 84]

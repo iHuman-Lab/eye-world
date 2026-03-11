@@ -7,11 +7,6 @@ import torch.nn.functional as F
 
 from models.utils import block_mask_tubelets_vectorized
 
-ckpt_path = "/home/cody/Documents/IHL/eye-world/tb_logs/ms_pacman/vjepa_world_model/version_2/checkpoints/epoch=49-step=138850.ckpt"
-
-ckpt = torch.load(ckpt_path, map_location="cpu")
-state_dict = ckpt["state_dict"]
-
 
 class VJEPA(pl.LightningModule):
     def __init__(
@@ -169,7 +164,7 @@ class ActionCondtionVJEPA(pl.LightningModule):
 
         for p in self.teacher.parameters():
             p.requires_grad = False
-        
+
 
         student_weights = {
         k.replace("model.student.", ""): v
@@ -197,7 +192,7 @@ class ActionCondtionVJEPA(pl.LightningModule):
 
         ac_vjepa.teacher.load_state_dict(teacher_weights)
 
-        
+
 
 
     def on_after_optimizer_step(self, optimizer):
