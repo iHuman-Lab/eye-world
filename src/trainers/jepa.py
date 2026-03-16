@@ -47,7 +47,7 @@ class VJEPA(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        img, _ = batch  # [B, T, H, W]
+        img, _, _action = batch  # [B, T, H, W]
         B = img.shape[0]
 
         # --------------------------------------------------

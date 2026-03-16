@@ -13,7 +13,7 @@ def read_webdataset(file_list, config):
             empty_check=False,
         )
         .decode("pil")
-        .to_tuple("jpg", "json")
+        .to_tuple("jpg", "json", "cls")
     )
     return dataset
 

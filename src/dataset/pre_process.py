@@ -31,10 +31,10 @@ class Resize:
             )
 
     def __call__(self, sample):
-        img, eye_gazes = sample
+        img, eye_gazes, action = sample
         img = self.transform(img)
 
-        return img, eye_gazes
+        return img, eye_gazes, action
 
 
 class Stack:
@@ -44,16 +44,19 @@ class Stack:
         self.config = config
 
     def __call__(self, sample):
-        img, eye_gazes = sample
+        img, eye_gazes, action = sample
         if len(self.stack) < self.stack_len:
             while len(self.stack) < self.stack_len:
                 self.stack.append(img)
         else:
             self.stack.append(img)
         stacked = torch.cat(list(self.stack), dim=0)
-        density_image = eye_gaze_to_density_image(img.shape, eye_gazes, self.config)
+        if self.config.get("eye_density", False):
+            gaze_out = eye_gaze_to_density_image(img.shape, eye_gazes, self.config)
+        else:
+            gaze_out = eye_gazes[-1]
 
-        return stacked, density_image
+        return stacked, gaze_out, action
 
 
 class ComposePreprocessor:

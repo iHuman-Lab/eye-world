@@ -33,13 +33,13 @@ class VJEPAEncoder(nn.Module):
 class TubeletEmbedding(nn.Module):
     def __init__(self, config, patch_dim, embed_dim=1024, img_size=84):
         """
-        config:    dict with patchx, patchy, stack_size, tubelet_size
+        config:    dict with patchx, patchy, stack_length, tubelet_size
         patch_dim: number of channels (1 for grayscale, 3 for RGB)
         """
         super().__init__()
         self.patchx = config["patchx"]
         self.patchy = config["patchy"]
-        self.stack_size = config["stack_size"]
+        self.stack_size = config["stack_length"]
         self.tubelet_size = config["tubelet_size"]
         self.patch_dim = patch_dim
         self.embed_dim = embed_dim
