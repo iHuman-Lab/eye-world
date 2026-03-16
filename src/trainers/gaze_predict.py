@@ -15,7 +15,7 @@ class GazeTraining(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        x, y = batch
+        x, y, _ = batch
         output = self.forward(x)
         loss = self.criterion(output, y)
         # grid = torchvision.utils.make_grid(output[0:10], normalize=True, nrow=5)
@@ -24,7 +24,7 @@ class GazeTraining(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
+        x, y, _ = batch
 
         output = self.forward(x)
         loss = self.criterion(output, y)

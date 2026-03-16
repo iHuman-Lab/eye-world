@@ -4,7 +4,7 @@ import yaml
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from data.data_write import eye_gaze_to_webdataset
-from dataset.pre_process_jepa import ComposePreprocessor, Resize, Stack
+from dataset.pre_process import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
 from models.networks import ConvNet, UNet
 from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
@@ -111,11 +111,11 @@ with skip_run("run", "jepa_training") as check, check():
     dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
     train_loader = dataloaders["train"]
 
-    for x, y in train_loader:
+    for x, y, action in train_loader:
         print("Train batch shape:", x.shape)  # [32, 4, 84, 84]
         break
 
-    patch_dim = 1 if config.get("grey_scale_v", True) else 3
+    patch_dim = 1 if config.get("grey_scale", True) else 3
     embed_dim = 768
     heads = 12
     mlp_dim = 3072

@@ -23,13 +23,18 @@ def read_bz2_file(file_path: Path):
     return None
 
 
-def read_gaze_data(file_path):
+def read_gaze_action_data(file_path):
     # Now read the whole file as raw text to get the gaze part
     gaze_data = []
+    action_data = []
     with open(file_path, "r") as f:
         next(f)  # skip header
         for line in f:
             parts = line.strip().split(",")
+            try:
+                action_data.append(int(parts[5]))
+            except (ValueError, IndexError):
+                action_data.append(0)
             try:
                 gaze_floats = list(map(float, parts[6:]))
             except ValueError:
@@ -39,8 +44,7 @@ def read_gaze_data(file_path):
                 for i in range(0, len(gaze_floats), 2)
             ]
             gaze_data.append(gaze_points)
-    # Add gaze column to dataframe
-    return gaze_data
+    return gaze_data, action_data
 
 
 def extract_frame_number(member):
@@ -52,7 +56,9 @@ def extract_frame_number(member):
     return int(match.group(1)) if match else 0
 
 
-def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> None:
+def extract_images_and_write_to_webdataset(
+    tar_bz2_file, writer, eye_gaze, actions
+) -> None:
     """
     Decompresses the .tar.bz2 file, extracts PNG images, and writes them to a WebDataset tar file.
     Sorts files based on the numeric part of the filename (e.g., JAW_3117023_17135.png → 17135).
@@ -80,6 +86,7 @@ def extract_images_and_write_to_webdataset(tar_bz2_file, writer, eye_gaze) -> No
                     "__key__": str(idx - 1),
                     "jpg": file_data,
                     "json": eye_gaze[idx - 1],
+                    "cls": actions[idx - 1],
                 }
                 writer.write(sample)
             except (ValueError, IndexError):
@@ -133,12 +140,12 @@ def eye_gaze_to_webdataset(game: str, config: dict) -> None:
 
             file_path = matched_files[0]
             read_path = file_path.with_suffix("")  # remove '.txt'
-            eye_gaze = read_gaze_data(file_path)
+            eye_gaze, actions = read_gaze_action_data(file_path)
 
             # Write the game frames to .tar files
             tar_bz2_file = read_path.with_name(f"{read_path.name}.tar.bz2")
             extract_images_and_write_to_webdataset(
-                tar_bz2_file, webdataset_writer, eye_gaze
+                tar_bz2_file, webdataset_writer, eye_gaze, actions
             )
 
     # Close the webdataset writer gracefully
