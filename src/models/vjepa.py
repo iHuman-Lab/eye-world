@@ -1,6 +1,5 @@
-import copy
-
 import torch.nn as nn
+import torch.nn.functional as F
 from kornia.contrib import compute_padding, extract_tensor_patches
 
 from models.utils import get_3d_sincos_pos_embed
@@ -141,3 +140,32 @@ class Predictor(nn.Module):
         returns: [B, N_masked, D]
         """
         return self.decoder(tgt=queries, memory=context)
+
+
+class ActionOneHot(nn.Module):
+    def __init__(self, num_actions=18):
+        super().__init__()
+        self.num_actions = num_actions
+
+    def forward(self, action):
+        return F.one_hot(action.long(), num_classes=self.num_actions).float()
+
+
+class ActionToken(nn.Module):
+    def __init__(self, num_actions=18, token_dim=768):
+        super().__init__()
+
+        self.expand = ActionOneHot(num_actions)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(num_actions, 128),
+            nn.ReLU(),
+            nn.Linear(128, 512),
+            nn.ReLU(),
+            nn.Linear(512, token_dim),
+        )
+
+    def forward(self, action):
+        one_hot = self.expand(action)  # [B,18] or [B,T,18]
+        token = self.mlp(one_hot)  # [B,token_dim] or [B,T,token_dim]
+        return token
