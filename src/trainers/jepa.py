@@ -2,9 +2,13 @@ import copy
 
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from models.utils import block_mask_tubelets_vectorized
+
+# from utils import format_batch_for_vjepa
+from trainers.utils import format_batch_for_vjepa
 
 
 class VJEPA(pl.LightningModule):
@@ -135,6 +139,36 @@ class VJEPA(pl.LightningModule):
             weight_decay=1e-4,
         )
 
+    def format_batch_for_vjepa(batch, config):
+        stacked_imgs, stacked_gaze, stacked_actions = batch
+
+        # -----------------------------
+        # Get shapes
+        # -----------------------------
+        B, CT, H, W = stacked_imgs.shape
+        T = stacked_actions.shape[1]  # sequence length
+        C = CT // T  # channels per frame
+
+        # -----------------------------
+        # Reshape images: [B, C*T, H, W] → [B, T, C, H, W]
+        # -----------------------------
+        imgs = stacked_imgs.view(B, T, C, H, W)
+
+        # If grayscale (C=1), squeeze channel dim
+        if C == 1:
+            imgs = imgs.squeeze(2)  # → [B, T, H, W]
+        else:
+            # If RGB, you may want to convert or keep as is
+            # Option: average channels → grayscale
+            imgs = imgs.mean(dim=2)  # → [B, T, H, W]
+
+        # -----------------------------
+        # Actions (already correct shape)
+        # -----------------------------
+        actions = stacked_actions  # [B, T]
+
+        return imgs, actions
+
 
 class ActionConditionVJEPA(pl.LightningModule):
     def __init__(
@@ -216,64 +250,104 @@ class ActionConditionVJEPA(pl.LightningModule):
     def on_after_optimizer_step(self, optimizer, optimizer_idx=None):
         self.update_teacher()
 
+    def format_batch_for_vjepa(batch, config):
+        stacked_imgs, stacked_gaze, stacked_actions = batch
+
+        # -----------------------------
+        # Get shapes
+        # -----------------------------
+        B, CT, H, W = stacked_imgs.shape
+        T = stacked_actions.shape[1]  # sequence length
+        C = CT // T  # channels per frame
+
+        # -----------------------------
+        # Reshape images: [B, C*T, H, W] → [B, T, C, H, W]
+        # -----------------------------
+        imgs = stacked_imgs.view(B, T, C, H, W)
+
+        # If grayscale (C=1), squeeze channel dim
+        if C == 1:
+            imgs = imgs.squeeze(2)  # → [B, T, H, W]
+        else:
+            # If RGB, you may want to convert or keep as is
+            # Option: average channels → grayscale
+            imgs = imgs.mean(dim=2)  # → [B, T, H, W]
+
+        # -----------------------------
+        # Actions (already correct shape)
+        # -----------------------------
+        actions = stacked_actions  # [B, T]
+
+        return imgs, actions
+
     def training_step(self, batch, batch_idx):
-        # img, actions = batch  # img: [B, T, H, W], actions: [B, T, A_dim]
-        img, _ = batch
-        # B, T, H, W = img.shape
-        # B = img.shape[0]
-        # T = img.shape[1]
-
-        img = torch.stack(img) if isinstance(img, list) else img
-
-        B, T, H, W = img.shape
-
-        D = self.model.student.encoder.layers[0].self_attn.embed_dim
-        a = torch.randn(B, T, device=img.device)
-        # -------------------------------
-        # Tubelet Embedding
-        # -------------------------------
-        x = img.unsqueeze(2)  # [B, T, 1, H, W]
-        all_tokens = self.model.tubelet_embed(x)  # [B, N, D]
-        tokens_per_frame = all_tokens.size(1) // T
-        action_emb = self.action_embed(a)
-
-        B, N, D = all_tokens.shape
-        all_tokens = self.model.student.encoder(all_tokens)  # [B, N, D]
-
-        tokens_per_frame = N // T
-        frame_latents = all_tokens.reshape(B, T, tokens_per_frame, D).mean(dim=2)
 
         # -------------------------------
-        # Build Causal Sequence [z0,a0,z1,a1,...]
+        # Format batch
         # -------------------------------
-        seq = []
-        for t in range(T):
-            seq.append(frame_latents[:, t : t + 1, :])
-            seq.append(action_emb[:, t : t + 1, :])
-        seq = torch.cat(seq, dim=1)  # [B, 2*T, D]
+        img, actions = format_batch_for_vjepa(batch, self.config)
+
+        if isinstance(img, list):
+            img = torch.stack(img)
+
+        B, T, H, W = img.shape  # T should be 5
+        print(img.shape)
+        # -------------------------------
+        # Split sequence (CRITICAL)
+        # -------------------------------
+        student_frames = img[:, :4]  # first 4 frames
+        teacher_frame = img[:, 4:]  # last 4 frames # [B, 1, H, W]
+        print(student_frames.shape)
+        student_x = student_frames.unsqueeze(2)  # [B, 4, 1, H, W]
+        teacher_x = teacher_frame.unsqueeze(2)  # [B, 1, 1, H, W]
 
         # -------------------------------
-        # Predict Future Latent
+        # Student forward
         # -------------------------------
-        # Use teacher latents for target (next frame)
         with torch.no_grad():
-            teacher_latents = self.teacher(
-                frame_latents[:, -1:, :].reshape(B, 1, D)
-            )  # last frame latent
+            student_tokens = self.model.tubelet_embed(student_x)  # [B, N, D]
+            student_tokens = self.model.student.encoder(student_tokens)
 
-        # Autoregressive prediction
-        # Here we shift input by 1 to predict next latent
-        tgt_input = seq[:, :-1, :]  # all except last token
-        pred_seq = self.latent_predictor(tgt_input, tgt_input)  # [B, 2*T-1, D]
+        # -------------------------------
+        # Action embedding (FIXED)
+        # -------------------------------
+        last_actions = actions[:, -2]  # [B]
+        action_emb = self.action_embed(last_actions)  # [B, D]
+        action_emb = action_emb.unsqueeze(1)  # [B, 1, D]
 
-        # Take last predicted latent for last frame
-        student_pred_last_frame = pred_seq[:, -2, :]  # predicted latent for last frame
+        # -------------------------------
+        # Combine tokens + action
+        # -------------------------------
+        seq = torch.cat([student_tokens, action_emb], dim=1)  # [B, N+1, D]
+
+        # -------------------------------
+        # Teacher forward (FIXED)
+        # -------------------------------
+        with torch.no_grad():
+            teacher_tokens = self.model.tubelet_embed(teacher_x)  # [B, Nt, D]
+            teacher_latents = self.teacher(teacher_tokens)  # [B, Nt, D]
+
+        # -------------------------------
+        # Predictor
+        # -------------------------------
+        # Use sequence except last token as input
+        pred_seq = self.latent_predictor(seq[:, :-1, :], seq[:, :-1, :])
+
+        # Take last predicted token
+        student_pred = pred_seq[:, -1, :]  # [B, D]
+
+        # -------------------------------
+        # Target
+        # -------------------------------
+        target = teacher_latents.mean(dim=1)  # [B, D]
 
         # -------------------------------
         # Loss
         # -------------------------------
-        loss = F.smooth_l1_loss(student_pred_last_frame, teacher_latents.squeeze(1))
+        loss = F.smooth_l1_loss(student_pred, target)
+
         self.log("loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+
         return loss
 
     def configure_optimizers(self):

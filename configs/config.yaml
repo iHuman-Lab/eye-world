@@ -2,7 +2,7 @@
 raw_data_path: './data/raw/'
 meta_data_path: './data/raw/meta_data.csv'
 processed_data_path: './data/processed/'
-
+ckpt_path : './tb_logs/ms_pacman/vjepa_world_model/version_2/checkpoints/epoch=49-step=138850.ckpt'
 # Pytorch
 epochs: 50
 # Game data
@@ -10,7 +10,7 @@ games: ['ms_pacman']
 
 # Dataset parameters
 batch_size: 32
-num_workers: 1
+num_workers: 3
 shuffle: False
 
 # Data pre-processing
@@ -20,7 +20,7 @@ size_y: 84
 train_sub: ['R']
 test_sub: ['K']
 grey_scale: True
-stack_length: 4
+stack_length: 8
 sigma: 5
 eye_density: True
 use_fixations: True

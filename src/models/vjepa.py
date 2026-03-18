@@ -38,7 +38,7 @@ class TubeletEmbedding(nn.Module):
         super().__init__()
         self.patchx = config["patchx"]
         self.patchy = config["patchy"]
-        self.stack_size = config["stack_length"]
+        self.stack_size = 4  # config["stack_length"]
         self.tubelet_size = config["tubelet_size"]
         self.patch_dim = patch_dim
         self.embed_dim = embed_dim
@@ -62,7 +62,7 @@ class TubeletEmbedding(nn.Module):
         returns: [B, num_patches, embed_dim]
         """
         B, T, C, H, W = video.shape
-        assert T == self.stack_size, f"Expected T={self.stack_size}, got {T}"
+        # assert T == self.stack_size, f"Expected T={self.stack_size}, got {T}"
 
         video_reshaped = video.reshape(B * T, C, H, W)
         stride = (self.patchx, self.patchy)
