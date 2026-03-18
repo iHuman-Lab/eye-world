@@ -4,6 +4,7 @@ import torch
 import webdataset as wds
 import yaml
 from lightning.pytorch.loggers import TensorBoardLogger
+from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
 from data.data_write import eye_gaze_to_webdataset
@@ -11,7 +12,13 @@ from dataset.pre_process import ComposePreprocessor, Resize, Stack
 from dataset.torch_dataset import get_torch_dataloaders
 from dataset.tri_stack import StackWithLabels
 from models.networks import ConvNet, UNet
-from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
+from models.vjepa import (
+    ActionToken,
+    Predictor,
+    TransformerEncoder,
+    TubeletEmbedding,
+    VJEPAEncoder,
+)
 from trainers.gaze_predict import GazeTraining
 from trainers.jepa import VJEPA, ActionConditionVJEPA
 from utils import skip_run
@@ -153,12 +160,51 @@ with skip_run("skip", "jepa_training") as check, check():
     )
 
     trainer.fit(model, train_loader)
-with skip_run("skip", "jepa_action_training") as check, check():
+with skip_run("run", "jepa_action_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
-    preprocessor = ComposePreprocessor([Resize(config), Stack(config)])
+    preprocessor = ComposePreprocessor([Resize(config), StackWithLabels(config)])
 
+    # -----------------------------
+    # Helper: create WebDataset DataLoader
+    # -----------------------------
+
+    def get_web_dataloader(config, preprocessor, split="train", batch_size=2):
+        data_dir = config["processed_data_path"]  # e.g., "data/"
+        print(config["processed_data_path"])
+        file_pattern = f"{data_dir}/{split}-*.tar"  # automatically pick up shards
+
+        # WebDataset with preprocessing applied directly
+        dataset = (
+            wds.WebDataset(
+                file_pattern, shardshuffle=False, nodesplitter=wds.split_by_worker
+            )
+            .decode("pil")  # decode images to PIL
+            .to_tuple("jpg", "json", "cls")  # tuple: (image, gaze, action)
+            .map(preprocessor)  # preprocess items directly
+        )
+
+        # Collate function to batch tuples of tensors
+        def collate_fn(batch):
+            imgs, gazes, actions = zip(*batch)
+            return (
+                torch.stack(imgs),
+                torch.stack(gazes),
+                torch.stack(actions),
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+
+    # -----------------------------
+    # Create DataLoader
+    # -----------------------------
+    # train_loader = get_torch_dataloaders(game, config, preprocessor=preprocessor)
     dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
     train_loader = dataloaders["train"]
 
@@ -167,14 +213,15 @@ with skip_run("skip", "jepa_action_training") as check, check():
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state_dict = ckpt["state_dict"]
 
+    """
     for x, y in train_loader:
         print("Train batch shape:", x.shape)  # [32, 4, 84, 84]
         break
-
+        """
     patch_dim = 1 if config.get("grey_scale_v", True) else 3
-    embed_dim = 1024
-    heads = 8
-    mlp_dim = 2048
+    embed_dim = 768  # 1024
+    heads = 12
+    mlp_dim = 3072  # 2048
 
     tubelet_embed = TubeletEmbedding(
         config=config,
@@ -196,80 +243,18 @@ with skip_run("skip", "jepa_action_training") as check, check():
 
     trainer = pl.Trainer(
         logger=logger,
+        strategy=DDPStrategy(find_unused_parameters=True),
+        accelerator="gpu",  # replaces 'gpus'
+        devices=2,  # replaces 'gpus=2'
         max_epochs=config["epochs"],
-        accelerator="auto",
-        devices="auto",
         precision="bf16-mixed",
         log_every_n_steps=10,
     )
 
     trainer.fit(model, train_loader)
 
+
 with skip_run("skip", "stack_creator") as check, check():
-    # -----------------------------
-    # Preprocessor
-    # -----------------------------
-    preprocessor = ComposePreprocessor([Resize(config), StackWithLabels(config)])
-
-    # -----------------------------
-    # Helper: create WebDataset DataLoader
-    # -----------------------------
-    def get_web_dataloader(config, preprocessor, split="train", batch_size=2):
-        data_dir = config["processed_data_path"]  # e.g., "data/"
-        file_pattern = f"{data_dir}/{split}-*.tar"  # automatically pick up shards
-
-        dataset = (
-            wds.WebDataset(
-                file_pattern, shardshuffle=False, nodesplitter=wds.split_by_worker
-            )
-            .decode("pil")  # decode images to PIL
-            .to_tuple("jpg", "json", "cls")  # tuple: (image, gaze, action)
-        )
-
-        # Lazy preprocessing
-        def preprocess_dataset(ds):
-            for sample in ds:
-                yield preprocessor(sample)
-
-        preprocessed_dataset = preprocess_dataset(dataset)
-
-        # Collate function to batch tuples of tensors
-        def collate_fn(batch):
-            imgs, gazes, actions = zip(*batch)
-            return (
-                torch.stack(imgs),
-                torch.stack(gazes),
-                torch.stack(actions),
-            )
-
-        return DataLoader(
-            preprocessed_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-        )
-
-    # -----------------------------
-    # Create DataLoader
-    # -----------------------------
-    train_loader = get_web_dataloader(config, preprocessor, split="train", batch_size=2)
-
-    # -----------------------------
-    # Iterate and print first batch
-    # -----------------------------
-    for batch_idx, (stacked_imgs, stacked_gaze, stacked_actions) in enumerate(
-        train_loader
-    ):
-        print(f"Batch {batch_idx}:")
-        print("Stacked images:", stacked_imgs.shape)  # e.g., [2, stack_len*C, H, W]
-        print(
-            "Stacked gaze:", stacked_gaze.shape
-        )  # e.g., [2, stack_len, 2] or [2, stack_len*C, H, W]
-        print("Stacked actions:", stacked_actions.shape)  # e.g., [2, stack_len]
-        break  # just show first batch
-
-
-with skip_run("run", "stack_creator") as check, check():
     # -----------------------------
     # Preprocessor
     # -----------------------------
