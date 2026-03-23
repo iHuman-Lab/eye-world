@@ -151,7 +151,7 @@ class ActionOneHot(nn.Module):
         return F.one_hot(action.long(), num_classes=self.num_actions).float()
 
 
-class ActionToken(nn.Module):
+class ActionEmbedding(nn.Module):
     def __init__(self, num_actions=18, token_dim=768):
         super().__init__()
 

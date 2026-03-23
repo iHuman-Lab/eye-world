@@ -6,8 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.utils import block_mask_tubelets_vectorized
-
-# from utils import format_batch_for_vjepa
 from trainers.utils import format_batch_for_vjepa
 
 
@@ -51,7 +49,7 @@ class VJEPA(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        img, _, _action = batch  # [B, T, H, W]
+        img, _ = batch  # [B, T, H, W]
         B = img.shape[0]
 
         # --------------------------------------------------
@@ -139,36 +137,6 @@ class VJEPA(pl.LightningModule):
             weight_decay=1e-4,
         )
 
-    def format_batch_for_vjepa(batch, config):
-        stacked_imgs, stacked_gaze, stacked_actions = batch
-
-        # -----------------------------
-        # Get shapes
-        # -----------------------------
-        B, CT, H, W = stacked_imgs.shape
-        T = stacked_actions.shape[1]  # sequence length
-        C = CT // T  # channels per frame
-
-        # -----------------------------
-        # Reshape images: [B, C*T, H, W] → [B, T, C, H, W]
-        # -----------------------------
-        imgs = stacked_imgs.view(B, T, C, H, W)
-
-        # If grayscale (C=1), squeeze channel dim
-        if C == 1:
-            imgs = imgs.squeeze(2)  # → [B, T, H, W]
-        else:
-            # If RGB, you may want to convert or keep as is
-            # Option: average channels → grayscale
-            imgs = imgs.mean(dim=2)  # → [B, T, H, W]
-
-        # -----------------------------
-        # Actions (already correct shape)
-        # -----------------------------
-        actions = stacked_actions  # [B, T]
-
-        return imgs, actions
-
 
 class ActionConditionVJEPA(pl.LightningModule):
     def __init__(
@@ -216,28 +184,27 @@ class ActionConditionVJEPA(pl.LightningModule):
             batch_first=True,
         )
 
-        # ----------------------------
-        # Load pretrained checkpoint
-        # ----------------------------
         ckpt_path = config["ckpt_path"]
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        sd = ckpt["state_dict"]
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
 
-        # Load student weights
-        student_weights = {
-            k.replace("model.student.", ""): v
-            for k, v in sd.items()
-            if k.startswith("model.student.")
-        }
-        self.model.student.load_state_dict(student_weights)
+            # Load weights
+            student_weights = {
+                k.replace("model.student.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.student.")
+            }
+            self.model.student.load_state_dict(student_weights)
 
-        # Load tubelet embedding weights
-        embed_weights = {
-            k.replace("model.tubelet_embed.", ""): v
-            for k, v in sd.items()
-            if k.startswith("model.tubelet_embed.")
-        }
-        self.model.tubelet_embed.load_state_dict(embed_weights)
+            # Load tubelet embedding weights
+            embed_weights = {
+                k.replace("model.tubelet_embed.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.tubelet_embed.")
+            }
+            self.model.tubelet_embed.load_state_dict(embed_weights)
+        except FileNotFoundError:
+            pass
 
         # Teacher starts as EMA of student
         self.teacher.load_state_dict(self.model.student.state_dict())
@@ -250,38 +217,7 @@ class ActionConditionVJEPA(pl.LightningModule):
     def on_after_optimizer_step(self, optimizer, optimizer_idx=None):
         self.update_teacher()
 
-    def format_batch_for_vjepa(batch, config):
-        stacked_imgs, stacked_gaze, stacked_actions = batch
-
-        # -----------------------------
-        # Get shapes
-        # -----------------------------
-        B, CT, H, W = stacked_imgs.shape
-        T = stacked_actions.shape[1]  # sequence length
-        C = CT // T  # channels per frame
-
-        # -----------------------------
-        # Reshape images: [B, C*T, H, W] → [B, T, C, H, W]
-        # -----------------------------
-        imgs = stacked_imgs.view(B, T, C, H, W)
-
-        # If grayscale (C=1), squeeze channel dim
-        if C == 1:
-            imgs = imgs.squeeze(2)  # → [B, T, H, W]
-        else:
-            # If RGB, you may want to convert or keep as is
-            # Option: average channels → grayscale
-            imgs = imgs.mean(dim=2)  # → [B, T, H, W]
-
-        # -----------------------------
-        # Actions (already correct shape)
-        # -----------------------------
-        actions = stacked_actions  # [B, T]
-
-        return imgs, actions
-
     def training_step(self, batch, batch_idx):
-
         # -------------------------------
         # Format batch
         # -------------------------------
@@ -291,13 +227,11 @@ class ActionConditionVJEPA(pl.LightningModule):
             img = torch.stack(img)
 
         B, T, H, W = img.shape  # T should be 5
-        print(img.shape)
         # -------------------------------
         # Split sequence (CRITICAL)
         # -------------------------------
         student_frames = img[:, :4]  # first 4 frames
         teacher_frame = img[:, 4:]  # last 4 frames # [B, 1, H, W]
-        print(student_frames.shape)
         student_x = student_frames.unsqueeze(2)  # [B, 4, 1, H, W]
         teacher_x = teacher_frame.unsqueeze(2)  # [B, 1, 1, H, W]
 
@@ -346,7 +280,7 @@ class ActionConditionVJEPA(pl.LightningModule):
         # -------------------------------
         loss = F.smooth_l1_loss(student_pred, target)
 
-        self.log("loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("loss/action_jepa", loss, on_epoch=True, prog_bar=True)
 
         return loss
 

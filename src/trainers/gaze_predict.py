@@ -5,10 +5,9 @@ from torch import nn
 
 
 class GazeTraining(pl.LightningModule):
-    def __init__(self, hparams, net, data_loader):
+    def __init__(self, hparams, net):
         super().__init__()
         self.model = net
-        self.data_loader = data_loader
         self.criterion = nn.KLDivLoss()
 
     def forward(self, x):
@@ -42,18 +41,9 @@ class GazeTraining(pl.LightningModule):
 
         return loss
 
-    def train_dataloader(self):
-        return self.data_loader["train"]
-
-    def val_dataloader(self):
-        return self.data_loader["test"]
-
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
             self.parameters(),
             lr=2.5 * 1e-4,
-        )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.1, patience=10
         )
         return {"optimizer": optimizer}

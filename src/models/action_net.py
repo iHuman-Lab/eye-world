@@ -35,5 +35,3 @@ class ActionNet(nn.Module):
         x = self.fc_layers(x)
 
         return x  # logits
-
-    import pytorch_lightning as pl

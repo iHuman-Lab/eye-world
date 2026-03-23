@@ -6,6 +6,10 @@ from torchvision import transforms
 from .eye_gaze_process import eye_gaze_to_density_image
 
 
+def _normalize_min_max(x):
+    return (x - torch.min(x)) / (torch.max(x) - torch.min(x))
+
+
 class Resize:
     def __init__(self, config):
         if config.get("grey_scale", True):
@@ -14,9 +18,7 @@ class Resize:
                     transforms.Resize((config["size_x"], config["size_y"])),
                     transforms.Grayscale(num_output_channels=1),
                     transforms.ToTensor(),
-                    transforms.Lambda(
-                        lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))
-                    ),
+                    transforms.Lambda(_normalize_min_max),
                 ]
             )
         else:
@@ -24,9 +26,7 @@ class Resize:
                 [
                     transforms.Resize((config["size_x"], config["size_y"])),
                     transforms.ToTensor(),
-                    transforms.Lambda(
-                        lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))
-                    ),
+                    transforms.Lambda(_normalize_min_max),
                 ]
             )
 
@@ -56,7 +56,7 @@ class Stack:
         else:
             gaze_out = eye_gazes[-1]
 
-        return stacked, gaze_out, action
+        return stacked, gaze_out
 
 
 class StackWithLabels:

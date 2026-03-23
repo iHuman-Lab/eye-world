@@ -3,8 +3,6 @@ import torch
 import torch.nn as nn
 import torchvision
 
-from models.actionNet import ActionNet
-
 
 class ActionTraining(pl.LightningModule):
     def __init__(self, hparams, net, data_loader):
@@ -20,19 +18,48 @@ class ActionTraining(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        x, y = batch
+        stacked_imgs, stacked_gaze, stacked_actions = batch
 
-        logits = self.forward(x)
+        # reshape batch like in format_batch_for_vjepa
+        B, CT, H, W = stacked_imgs.shape
+        T = stacked_actions.shape[1]  # sequence length
+        C = CT // T  # channels per frame
+
+        # reshape: [B, C*T, H, W] → [B, T, C, H, W]
+        x = stacked_imgs.view(B, T, C, H, W)
+
+        # optionally convert grayscale
+        if C == 1:
+            x = x.squeeze(2)  # → [B, T, H, W]
+        else:
+            x = x.mean(dim=2)  # average over channels → [B, T, H, W]
+
+        # last action as target
+        y = stacked_actions[:, -1]
+
+        logits = self(x)
         loss = self.criterion(logits, y)
 
         self.log("train_loss", loss, on_epoch=True, on_step=False, sync_dist=True)
-
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
+        stacked_imgs, stacked_gaze, stacked_actions = batch
 
-        logits = self.forward(x)
+        # reshape batch
+        B, CT, H, W = stacked_imgs.shape
+        T = stacked_actions.shape[1]
+        C = CT // T
+
+        x = stacked_imgs.view(B, T, C, H, W)
+        if C == 1:
+            x = x.squeeze(2)
+        else:
+            x = x.mean(dim=2)
+
+        y = stacked_actions[:, -1]
+
+        logits = self(x)
         loss = self.criterion(logits, y)
 
         preds = torch.argmax(logits, dim=1)
@@ -42,7 +69,9 @@ class ActionTraining(pl.LightningModule):
         self.log("val_acc", acc, on_epoch=True, on_step=False, sync_dist=True)
 
         # log some inputs
-        grid = torchvision.utils.make_grid(x[0:10], normalize=True, nrow=5)
+        grid = torchvision.utils.make_grid(
+            x[:, -1, :, :].unsqueeze(1)[0:10], normalize=True, nrow=5
+        )
         self.logger.experiment.add_image("input_frames", grid, self.current_epoch)
 
         return loss
@@ -71,13 +100,3 @@ class ActionTraining(pl.LightningModule):
             "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"},
         }
 
-    num_actions = 18  # typical Atari action space
-
-
-model = ActionNet(num_actions)
-
-trainer_module = ActionTraining(hparams=None, net=model, data_loader=data_loaders)
-
-trainer = pl.Trainer(max_epochs=50, accelerator="gpu", devices=1)
-
-trainer.fit(trainer_module)
