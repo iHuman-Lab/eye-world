@@ -38,7 +38,7 @@ class TubeletEmbedding(nn.Module):
         super().__init__()
         self.patchx = config["patchx"]
         self.patchy = config["patchy"]
-        self.stack_size = 4  # config["stack_length"]
+        self.stack_size = config["context_frames"]
         self.tubelet_size = config["tubelet_size"]
         self.patch_dim = patch_dim
         self.embed_dim = embed_dim

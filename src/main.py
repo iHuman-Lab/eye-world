@@ -111,7 +111,7 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     trainer.fit(model)
 
 
-with skip_run("run", "jepa_training") as check, check():
+with skip_run("skip", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -193,7 +193,7 @@ with skip_run("run", "jepa_action_conditioned") as check, check():
         logger=logger,
         strategy=DDPStrategy(find_unused_parameters=True),
         accelerator="gpu",  # replaces 'gpus'
-        devices=2,  # replaces 'gpus=2'
+        devices=1,  # replaces 'gpus=2'
         max_epochs=config["epochs"],
         precision="bf16-mixed",
         log_every_n_steps=10,

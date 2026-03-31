@@ -226,12 +226,14 @@ class ActionConditionVJEPA(pl.LightningModule):
         if isinstance(img, list):
             img = torch.stack(img)
 
-        B, T, H, W = img.shape  # T should be 5
+        context_frames = self.config[
+            "context_frames"
+        ]  # n frames for student; rest go to teacher
         # -------------------------------
         # Split sequence (CRITICAL)
         # -------------------------------
-        student_frames = img[:, :4]  # first 4 frames
-        teacher_frame = img[:, 4:]  # last 4 frames # [B, 1, H, W]
+        student_frames = img[:, :context_frames]
+        teacher_frame = img[:, context_frames:]
         student_x = student_frames.unsqueeze(2)  # [B, 4, 1, H, W]
         teacher_x = teacher_frame.unsqueeze(2)  # [B, 1, 1, H, W]
 
@@ -245,7 +247,7 @@ class ActionConditionVJEPA(pl.LightningModule):
         # -------------------------------
         # Action embedding (FIXED)
         # -------------------------------
-        last_actions = actions[:, -2]  # [B]
+        last_actions = actions[:, context_frames - 1]  # action at last context frame [B]
         action_emb = self.action_embed(last_actions)  # [B, D]
         action_emb = action_emb.unsqueeze(1)  # [B, 1, D]
 
