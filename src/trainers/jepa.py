@@ -2,9 +2,11 @@ import copy
 
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from models.utils import block_mask_tubelets_vectorized
+from trainers.utils import format_batch_for_vjepa
 
 
 class VJEPA(pl.LightningModule):
@@ -47,7 +49,7 @@ class VJEPA(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        img, _, _action = batch  # [B, T, H, W]
+        img, _ = batch  # [B, T, H, W]
         B = img.shape[0]
 
         # --------------------------------------------------
@@ -131,6 +133,163 @@ class VJEPA(pl.LightningModule):
             list(self.model.tubelet_embed.parameters())
             + list(self.model.student.parameters())
             + list(self.pred.parameters()),
+            lr=self.lr,
+            weight_decay=1e-4,
+        )
+
+
+class ActionConditionVJEPA(pl.LightningModule):
+    def __init__(
+        self,
+        model,
+        action_embed,
+        config,
+        latent_pred_dim=None,
+        num_visible_frames=4,
+        lr=1e-4,
+        ema_decay=0.996,
+    ):
+        """
+        Args:
+            model: VJEPAEncoder containing student + tubelet_embed
+            config: dict, must contain "action_dim"
+            ckpt_path: path to pretrained V-JEPA checkpoint
+            latent_pred_dim: optional dim for latent predictor
+            num_visible_frames: how many frames student sees
+        """
+        super().__init__()
+        self.model = model
+        self.config = config
+        self.lr = lr
+        self.ema_decay = ema_decay
+        self.num_visible_frames = num_visible_frames
+
+        # Teacher starts as copy of student
+        self.teacher = copy.deepcopy(model.student)
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+        # Action embedding
+        self.action_embed = action_embed
+
+        # Autoregressive latent predictor (causal transformer)
+        D = model.student.encoder.layers[0].self_attn.embed_dim
+        latent_pred_dim = latent_pred_dim or D
+        self.latent_predictor = nn.Transformer(
+            d_model=D,
+            nhead=8,
+            num_encoder_layers=3,
+            num_decoder_layers=3,
+            dim_feedforward=2048,
+            batch_first=True,
+        )
+
+        ckpt_path = config["ckpt_path"]
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+
+            # Load weights
+            student_weights = {
+                k.replace("model.student.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.student.")
+            }
+            self.model.student.load_state_dict(student_weights)
+
+            # Load tubelet embedding weights
+            embed_weights = {
+                k.replace("model.tubelet_embed.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.tubelet_embed.")
+            }
+            self.model.tubelet_embed.load_state_dict(embed_weights)
+        except FileNotFoundError:
+            pass
+
+        # Teacher starts as EMA of student
+        self.teacher.load_state_dict(self.model.student.state_dict())
+
+    def update_teacher(self):
+        with torch.no_grad():
+            for s, t in zip(self.model.student.parameters(), self.teacher.parameters()):
+                t.data.mul_(self.ema_decay).add_(s.data, alpha=1.0 - self.ema_decay)
+
+    def on_after_optimizer_step(self, optimizer, optimizer_idx=None):
+        self.update_teacher()
+
+    def training_step(self, batch, batch_idx):
+        # -------------------------------
+        # Format batch
+        # -------------------------------
+        img, actions = format_batch_for_vjepa(batch, self.config)
+
+        if isinstance(img, list):
+            img = torch.stack(img)
+
+        context_frames = self.config[
+            "context_frames"
+        ]  # n frames for student; rest go to teacher
+        # -------------------------------
+        # Split sequence (CRITICAL)
+        # -------------------------------
+        student_frames = img[:, :context_frames]
+        teacher_frame = img[:, context_frames:]
+        student_x = student_frames.unsqueeze(2)  # [B, 4, 1, H, W]
+        teacher_x = teacher_frame.unsqueeze(2)  # [B, 1, 1, H, W]
+
+        # -------------------------------
+        # Student forward
+        # -------------------------------
+        with torch.no_grad():
+            student_tokens = self.model.tubelet_embed(student_x)  # [B, N, D]
+            student_tokens = self.model.student.encoder(student_tokens)
+
+        # -------------------------------
+        # Action embedding (FIXED)
+        # -------------------------------
+        last_actions = actions[:, context_frames - 1]  # action at last context frame [B]
+        action_emb = self.action_embed(last_actions)  # [B, D]
+        action_emb = action_emb.unsqueeze(1)  # [B, 1, D]
+
+        # -------------------------------
+        # Combine tokens + action
+        # -------------------------------
+        seq = torch.cat([student_tokens, action_emb], dim=1)  # [B, N+1, D]
+
+        # -------------------------------
+        # Teacher forward (FIXED)
+        # -------------------------------
+        with torch.no_grad():
+            teacher_tokens = self.model.tubelet_embed(teacher_x)  # [B, Nt, D]
+            teacher_latents = self.teacher(teacher_tokens)  # [B, Nt, D]
+
+        # -------------------------------
+        # Predictor
+        # -------------------------------
+        # Use sequence except last token as input
+        pred_seq = self.latent_predictor(seq[:, :-1, :], seq[:, :-1, :])
+
+        # Take last predicted token
+        student_pred = pred_seq[:, -1, :]  # [B, D]
+
+        # -------------------------------
+        # Target
+        # -------------------------------
+        target = teacher_latents.mean(dim=1)  # [B, D]
+
+        # -------------------------------
+        # Loss
+        # -------------------------------
+        loss = F.smooth_l1_loss(student_pred, target)
+
+        self.log("loss/action_jepa", loss, on_epoch=True, prog_bar=True)
+
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(
+            list(self.latent_predictor.parameters())
+            + list(self.action_embed.parameters()),
             lr=self.lr,
             weight_decay=1e-4,
         )

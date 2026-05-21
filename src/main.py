@@ -2,14 +2,21 @@ import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import yaml
 from lightning.pytorch.loggers import TensorBoardLogger
+from pytorch_lightning.strategies import DDPStrategy
 
-from data.data_write import eye_gaze_to_webdataset
-from dataset.pre_process import ComposePreprocessor, Resize, Stack
+from data.data_write import create_webdataset
+from dataset.pre_process import ComposePreprocessor, Resize, Stack, StackWithLabels
 from dataset.torch_dataset import get_torch_dataloaders
 from models.networks import ConvNet, UNet
-from models.vjepa import Predictor, TransformerEncoder, TubeletEmbedding, VJEPAEncoder
+from models.vjepa import (
+    ActionEmbedding,
+    Predictor,
+    TransformerEncoder,
+    TubeletEmbedding,
+    VJEPAEncoder,
+)
 from trainers.gaze_predict import GazeTraining
-from trainers.jepa import VJEPA
+from trainers.jepa import VJEPA, ActionConditionVJEPA
 from utils import skip_run
 
 # The configuration file
@@ -19,17 +26,17 @@ config = yaml.load(open(str(config_path)), Loader=yaml.SafeLoader)
 
 with skip_run("skip", "data_cleaning") as check, check():
     for game in config["games"]:
-        eye_gaze_to_webdataset(game, config)
+        create_webdataset(game, config)
 
 
 with skip_run("skip", "torch_dataset") as check, check():
     game = config["games"][0]
-    preprocessor = ComposePreprocessor([Resize(config)])
+    preprocessor = ComposePreprocessor([Resize(config), Stack(config)])
     train_test_dataloaders = get_torch_dataloaders(
         game, config, preprocessor=preprocessor
     )
 
-    for x, y in train_test_dataloaders["train"]:
+    for x, y, z in train_test_dataloaders["train"]:
         print(x.shape)
         print(y.shape)
 
@@ -64,10 +71,8 @@ with skip_run("skip", "gaze_prediction") as check, check():
 
     # Dataloader
     preprocessor = ComposePreprocessor([Resize(config)])
-    train_test_dataloaders = get_torch_dataloaders(
-        game, config, preprocessor=preprocessor
-    )
-    model = GazeTraining(config, net, train_test_dataloaders)
+    dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
+    model = GazeTraining(config, net)
 
     # Trainer
     trainer = pl.Trainer(
@@ -75,7 +80,11 @@ with skip_run("skip", "gaze_prediction") as check, check():
         logger=logger,
         enable_progress_bar=True,
     )
-    trainer.fit(model)
+    trainer.fit(
+        model,
+        train_dataloaders=dataloaders["train"],
+        val_dataloaders=dataloaders["test"],
+    )
 
 
 with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
@@ -102,7 +111,7 @@ with skip_run("skip", "gaze_prediction_conv_deconv") as check, check():
     trainer.fit(model)
 
 
-with skip_run("run", "jepa_training") as check, check():
+with skip_run("skip", "jepa_training") as check, check():
     game = config["games"][0]
     logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
 
@@ -111,7 +120,7 @@ with skip_run("run", "jepa_training") as check, check():
     dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
     train_loader = dataloaders["train"]
 
-    for x, y, action in train_loader:
+    for x, y in train_loader:
         print("Train batch shape:", x.shape)  # [32, 4, 84, 84]
         break
 
@@ -149,3 +158,45 @@ with skip_run("run", "jepa_training") as check, check():
     )
 
     trainer.fit(model, train_loader)
+
+
+with skip_run("run", "jepa_action_conditioned") as check, check():
+    game = config["games"][0]
+    logger = TensorBoardLogger("tb_logs", name=f"{game}/vjepa_world_model/")
+
+    preprocessor = ComposePreprocessor([Resize(config), StackWithLabels(config)])
+    dataloaders = get_torch_dataloaders(game, config, preprocessor=preprocessor)
+
+    patch_dim = 1 if config.get("grey_scale_v", True) else 3
+    embed_dim = 768  # 1024
+    heads = 12
+    mlp_dim = 3072  # 2048
+
+    tubelet_embed = TubeletEmbedding(
+        config=config,
+        patch_dim=patch_dim,
+        embed_dim=embed_dim,
+        img_size=config.get("size_x", 84),
+    )
+    student = TransformerEncoder(embed_dim, depth=12, heads=heads, mlp_dim=mlp_dim)
+    net = VJEPAEncoder(tubelet_embed=tubelet_embed, student=student)
+    action_embed = ActionEmbedding()
+    model = ActionConditionVJEPA(
+        model=net,
+        action_embed=action_embed,
+        config=config,
+        lr=1e-4,
+        ema_decay=0.996,
+    )
+
+    trainer = pl.Trainer(
+        logger=logger,
+        strategy=DDPStrategy(find_unused_parameters=True),
+        accelerator="gpu",  # replaces 'gpus'
+        devices=1,  # replaces 'gpus=2'
+        max_epochs=config["epochs"],
+        precision="bf16-mixed",
+        log_every_n_steps=10,
+    )
+
+    trainer.fit(model, dataloaders["train"])

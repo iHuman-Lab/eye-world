@@ -4,7 +4,7 @@ import tarfile
 from io import BytesIO
 from pathlib import Path
 
-import pandas as pd
+from dataset.utils import get_game_meta_data
 
 from .tar_writer import WebDatasetWriter
 
@@ -93,22 +93,7 @@ def extract_images_and_write_to_webdataset(
                 print(f"Incorrect data format or mismatch for {member.name}")
 
 
-def get_game_meta_data(game: str, config: dict) -> pd.DataFrame:
-    """
-    Reads meta data CSV from config and returns DataFrame grouped by subject_id with list of trial_ids for the given game.
-    """
-    meta_data_path = Path(config["meta_data_path"])
-    meta_data = pd.read_csv(meta_data_path)
-    game_meta_data = (
-        meta_data[meta_data["GameName"] == game]
-        .groupby("subject_id")["trial_id"]
-        .apply(list)
-        .reset_index()
-    )
-    return game_meta_data
-
-
-def eye_gaze_to_webdataset(game: str, config: dict) -> None:
+def create_webdataset(game: str, config: dict) -> None:
     """
     For each subject and trial in the specified game, reads the corresponding eye gaze data file
     and writes images to a WebDataset tar file.
