@@ -120,5 +120,14 @@ tb_logs/*
 #tensorboard logs
 tb_logs/*
 
-# LLM 
+# LLM
 .claude/
+
+# Videos
+videos/*
+
+# Checkpoints
+checkpoints/*
+
+# Model checkpoints (can be very large)
+*.ckpt

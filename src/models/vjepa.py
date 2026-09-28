@@ -1,9 +1,8 @@
-import copy
-
-import torch.nn as nn
+import torch.nn.functional as F
 from kornia.contrib import compute_padding, extract_tensor_patches
+from torch import nn
 
-from models.utils import get_3d_sincos_pos_embed
+from .utils import get_3d_sincos_pos_embed
 
 DEBUG = False  # set True for debugging
 
@@ -33,13 +32,13 @@ class VJEPAEncoder(nn.Module):
 class TubeletEmbedding(nn.Module):
     def __init__(self, config, patch_dim, embed_dim=1024, img_size=84):
         """
-        config:    dict with patchx, patchy, stack_size, tubelet_size
+        config:    dict with patchx, patchy, stack_length, tubelet_size
         patch_dim: number of channels (1 for grayscale, 3 for RGB)
         """
         super().__init__()
         self.patchx = config["patchx"]
         self.patchy = config["patchy"]
-        self.stack_size = config["stack_size"]
+        self.stack_size = config["context_frames"]
         self.tubelet_size = config["tubelet_size"]
         self.patch_dim = patch_dim
         self.embed_dim = embed_dim
@@ -50,6 +49,7 @@ class TubeletEmbedding(nn.Module):
         self.num_patches = self.grid_h * self.grid_w * self.grid_depth
 
         tubelet_input_dim = patch_dim * self.patchx * self.patchy * self.tubelet_size
+
         self.proj = nn.Linear(tubelet_input_dim, embed_dim)
 
         pos_embed = get_3d_sincos_pos_embed(
@@ -62,8 +62,14 @@ class TubeletEmbedding(nn.Module):
         video: [B, T, C, H, W]
         returns: [B, num_patches, embed_dim]
         """
+
+        # print(f"patch_dim=  {self.patch_dim}")
+        # print(f"self.patchx= {self.patchx}")
+        # print(f"self.patchy= {self.patchy}")
+        # print(f"self.tubelet_size =   {self.tubelet_size}")
+
         B, T, C, H, W = video.shape
-        assert T == self.stack_size, f"Expected T={self.stack_size}, got {T}"
+        # assert T == self.stack_size, f"Expected T={self.stack_size}, got {T}"
 
         video_reshaped = video.reshape(B * T, C, H, W)
         stride = (self.patchx, self.patchy)
@@ -141,3 +147,32 @@ class Predictor(nn.Module):
         returns: [B, N_masked, D]
         """
         return self.decoder(tgt=queries, memory=context)
+
+
+class ActionOneHot(nn.Module):
+    def __init__(self, num_actions=18):
+        super().__init__()
+        self.num_actions = num_actions
+
+    def forward(self, action):
+        return F.one_hot(action.long(), num_classes=self.num_actions).float()
+
+
+class ActionEmbedding(nn.Module):
+    def __init__(self, num_actions=18, token_dim=768):
+        super().__init__()
+
+        self.expand = ActionOneHot(num_actions)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(num_actions, 128),
+            nn.ReLU(),
+            nn.Linear(128, 512),
+            nn.ReLU(),
+            nn.Linear(512, token_dim),
+        )
+
+    def forward(self, action):
+        one_hot = self.expand(action)  # [B,18] or [B,T,18]
+        token = self.mlp(one_hot)  # [B,token_dim] or [B,T,token_dim]
+        return token

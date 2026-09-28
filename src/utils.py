@@ -1,8 +1,14 @@
+import random
 import sys
 from contextlib import contextmanager
 
 import torch
 from tensorboard import program
+from torch.utils.data import IterableDataset
+
+# from utils import InterleavedDataset, skip_run
+
+# The configuration file
 
 
 class SkipWith(Exception):
@@ -76,4 +82,24 @@ def launch_tensorboard(hparams):
         ]
     )
     tb.launch()
-    return None
+
+    # --------------------------------------------------
+    # Interleave samples from multiple games
+    # --------------------------------------------------
+
+
+class InterleavedDataset(IterableDataset):
+    def __init__(self, datasets):
+        self.datasets = datasets
+
+    def __iter__(self):
+        iterators = [iter(ds) for ds in self.datasets]
+
+        while iterators:
+            idx = random.randrange(len(iterators))
+
+            try:
+                yield next(iterators[idx])
+
+            except StopIteration:
+                iterators.pop(idx)

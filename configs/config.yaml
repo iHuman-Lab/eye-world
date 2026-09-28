@@ -2,12 +2,13 @@
 raw_data_path: './data/raw/'
 meta_data_path: './data/raw/meta_data.csv'
 processed_data_path: './data/processed/'
-
+ckpt_path: '/home/cody/Documents/IHL/eye-world/tb_logs/ms_pacman/vjepa_world_model/version_1/checkpoints/epoch=49-step=164350.ckpt'
+action_classifier_checkpoint_dir: 'checkpoints/action_classifier'
 # Pytorch
-epochs: 50
+epochs: 35
 # Game data
-games: ['breakout']
-
+games: ['space_invaders']
+num_actions: 18 # full ALE action space, shared across all games
 # Dataset parameters
 batch_size: 32
 num_workers: 3
@@ -17,25 +18,73 @@ shuffle: False
 original_size: [210, 160]
 size_x: 84
 size_y: 84
-train_sub: ['R']
+train_sub: ['R', 'J', 'K']
 test_sub: ['K']
-grey_scale: True
-stack_length: 4
+grey_scale: False
+stack_length: 4 # total frames per sample (context + target)
+context_frames: &context_frames 4 # number of frames for student (context); remaining go to teacher
 sigma: 5
-use_fixation: True
+eye_density: True
+use_fixations: True
 maxdist: 25
 sampling_rate: 1000
 
 #vjepa
-stack_size: 4
-Grey_scale_v: True
 patchx: 21
 patchy: 21
-use_masking: True,
-tubelet_size: 4 # number of frames per tubelet'
+use_masking: True
+tubelet_size: *context_frames # number of frames per tubelet
 
 # Data writer parameters
 data_writer:
   shard_write: False
   shard_maxcount: 6250
   data_write_freq: 3
+
+#rollout
+rollout_steps: 12
+
+use_gaze_for_predictor: false
+use_gaze_for_loss: false
+gaze_topk: 4
+gaze_sigma: 8.0
+patch_size: 16
+gaze_is_normalized: True
+
+#action pipeline
+score_delta_skip_terminal_rollouts: False
+
+death_penalty: 100.0
+
+policy_lr: 5e-5
+policy_depth: 4
+policy_heads: 12
+policy_mlp_dim: 3072
+policy_dropout: 0.0
+
+policy_loss_weight: 1.0
+policy_entropy_weight: 0.01
+policy_random_fraction: 0.25
+policy_baseline_momentum: 0.99
+policy_normalize_advantage: True
+num_tubelets: 16
+cycle_steps: 12
+score_delta_num_envs: 16
+score_delta_updates: 1_000_000
+score_delta_lr: 1e-4
+score_delta_depth: 6
+score_delta_log_every: 10
+score_delta_save_every: 5000
+score_delta_precision: 'bf16'
+
+planner_horizon: 8
+planner_num_candidates: 512
+planner_cem_iterations: 4
+planner_elite_fraction: 0.1
+planner_eval_batch_size: 128
+planner_momentum: 0.25
+planner_min_prob: 0.01
+planner_temperature: 1.0
+score_delta_eval_checkpoint: 'tb_logs/ms_pacman/vjepa_rollout_world_model/version_2/checkpoints/epoch=49-step=164350.ckpt'
+
+cem_eval_episodes: 5

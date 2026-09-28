@@ -1,6 +1,5 @@
 import json
 
-import jsonpickle.ext.numpy as jsonpickle_numpy
 import numpy as np
 import webdataset as wds
 
@@ -22,7 +21,6 @@ class WebDatasetWriter:
     def __init__(self, config) -> None:
         self.cfg = config
         self.sink = None
-        jsonpickle_numpy.register_handlers()
 
     def _is_jsonable(self, x):
         try:
@@ -44,7 +42,6 @@ class WebDatasetWriter:
         # Check if file already exists, increment if so
         if self.cfg["data_writer"]["shard_write"]:
             path_to_file = write_path + file_name + "_%06d.tar.gz"
-            # shard_start_index = get_nonexistant_shard_path(path_to_file)
         else:
             path_to_file = write_path + file_name + ".tar.gz"
 
