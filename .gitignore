@@ -131,3 +131,6 @@ checkpoints/*
 
 # Model checkpoints (can be very large)
 *.ckpt
+
+# macOS
+.DS_Store

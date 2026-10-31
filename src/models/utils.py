@@ -89,6 +89,7 @@ def block_mask_tubelets_vectorized(tubelets, drop_ratio=0.5, block_size=2):
     return student_tokens, mask_bool
 
 
+''''
 def atari_to_gym(actions):
     """
     Convert full ALE action IDs (0-17) to the
@@ -130,9 +131,9 @@ def atari_to_gym(actions):
     }
 
     return mapping.get(actions, 0)
-
-
 '''
+
+
 def atari_to_gym(actions):
     """
     Convert ALE/Atari action IDs to Gym-style action IDs.
@@ -218,7 +219,9 @@ def atari_to_gym(actions):
         return 8
 
     raise ValueError(f"Unknown Atari action: {actions}")
-''' """'
+
+
+"""
 
 # Canonical action names in the order ActionNet's 9-way output uses
 # (index == the Gym-style action ID produced by atari_to_gym).

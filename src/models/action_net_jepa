@@ -1,0 +1,550 @@
+from pathlib import Path
+
+import torch
+from torch import nn
+from vjepa import TransformerEncoder, TubeletEmbedding
+
+
+class ActionNet(nn.Module):
+    """
+    JEPA-based action classifier.
+
+    Expected input:
+        [B, 12, 84, 84]
+
+    This represents:
+        4 RGB frames * 3 channels = 12 channels
+
+    Internally:
+        [B, 12, 84, 84]
+            ->
+        [B, 4, 3, 84, 84]
+            ->
+        optional grayscale conversion
+            ->
+        [B, 4, 1, 84, 84]
+            ->
+        TubeletEmbedding
+            ->
+        TransformerEncoder
+            ->
+        [B, 16, 768]
+            ->
+        flatten
+            ->
+        [B, 12288]
+            ->
+        fully connected action classifier
+            ->
+        [B, 18]
+            ->
+        [B, 1, 18]
+
+    The final [B, 1, 18] shape preserves compatibility with the
+    existing ActionTraining and RuntimeActionNet code.
+    """
+
+    def __init__(
+        self,
+        num_actions: int,
+        config: dict,
+        jepa_checkpoint: str | Path,
+        freeze_jepa: bool = True,
+    ):
+        super().__init__()
+
+        self.num_actions = int(num_actions)
+        self.num_predictions = 1
+        self.freeze_jepa = freeze_jepa
+
+        # =====================================================
+        # HARD-CODED JEPA DIMENSIONS
+        # =====================================================
+
+        self.num_tokens = 16
+        self.embed_dim = 768
+        self.flattened_dim = self.num_tokens * self.embed_dim
+
+        # 16 * 768 = 12288
+        if self.flattened_dim != 12288:
+            raise RuntimeError(
+                f"Unexpected JEPA flattened dimension: {self.flattened_dim}"
+            )
+
+        # =====================================================
+        # JEPA INPUT CONFIG
+        # =====================================================
+
+        self.grey_scale = bool(
+            config.get(
+                "grey_scale_v",
+                True,
+            )
+        )
+
+        patch_dim = 1 if self.grey_scale else 3
+
+        image_size = int(
+            config.get(
+                "image_size",
+                84,
+            )
+        )
+
+        # =====================================================
+        # PRETRAINED JEPA MODULES
+        # =====================================================
+
+        self.tubelet_embed = TubeletEmbedding(
+            config=config,
+            patch_dim=patch_dim,
+            embed_dim=self.embed_dim,
+            img_size=image_size,
+        )
+
+        self.student = TransformerEncoder(
+            dim=self.embed_dim,
+            depth=12,
+            heads=12,
+            mlp_dim=3072,
+        )
+
+        # =====================================================
+        # LOAD PRETRAINED JEPA
+        # =====================================================
+
+        self._load_jepa_checkpoint(Path(jepa_checkpoint))
+
+        # =====================================================
+        # OPTIONALLY FREEZE JEPA
+        # =====================================================
+
+        if self.freeze_jepa:
+            self._freeze_jepa()
+
+        # =====================================================
+        # ACTION CLASSIFIER
+        #
+        # Student output:
+        #
+        # [B, 16, 768]
+        #
+        # Flatten:
+        #
+        # [B, 12288]
+        #
+        # Classifier:
+        #
+        # 12288 -> 4096 -> 2048 -> 1024 -> 512 -> num_actions
+        # =====================================================
+
+        self.action_head = nn.Sequential(
+            nn.Flatten(
+                start_dim=1,
+            ),
+            nn.LayerNorm(
+                self.flattened_dim,
+            ),
+            nn.Linear(
+                self.flattened_dim,
+                4096,
+            ),
+            nn.LeakyReLU(),
+            nn.Dropout(
+                p=0.2,
+            ),
+            nn.Linear(
+                4096,
+                2048,
+            ),
+            nn.LeakyReLU(),
+            nn.Dropout(
+                p=0.2,
+            ),
+            nn.Linear(
+                2048,
+                1024,
+            ),
+            nn.LeakyReLU(),
+            nn.Dropout(
+                p=0.1,
+            ),
+            nn.Linear(
+                1024,
+                512,
+            ),
+            nn.LeakyReLU(),
+            nn.Linear(
+                512,
+                self.num_actions,
+            ),
+        )
+
+        print(
+            "ActionNet JEPA representation:",
+            f"{self.num_tokens} x {self.embed_dim}",
+        )
+
+        print(
+            "ActionNet flattened dimension:",
+            self.flattened_dim,
+        )
+
+        print(
+            "JEPA frozen:",
+            self.freeze_jepa,
+        )
+
+    # =========================================================
+    # LOAD JEPA CHECKPOINT
+    # =========================================================
+
+    def _load_jepa_checkpoint(
+        self,
+        checkpoint_path: Path,
+    ) -> None:
+
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"JEPA checkpoint was not found: {checkpoint_path}")
+
+        try:
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location="cpu",
+            )
+
+        checkpoint_state = checkpoint.get(
+            "state_dict",
+            checkpoint,
+        )
+
+        # =====================================================
+        # LOAD TUBELET EMBEDDING
+        #
+        # Expected Lightning keys:
+        #
+        # model.tubelet_embed....
+        #
+        # Also supports:
+        #
+        # tubelet_embed....
+        # =====================================================
+
+        tubelet_state = {}
+
+        tubelet_prefixes = (
+            "model.tubelet_embed.",
+            "tubelet_embed.",
+        )
+
+        for key, value in checkpoint_state.items():
+            for prefix in tubelet_prefixes:
+                if key.startswith(prefix):
+                    stripped_key = key[len(prefix) :]
+
+                    tubelet_state[stripped_key] = value
+
+                    break
+
+        if not tubelet_state:
+            raise RuntimeError(
+                "Could not find TubeletEmbedding weights in the JEPA checkpoint."
+            )
+
+        self.tubelet_embed.load_state_dict(
+            tubelet_state,
+            strict=True,
+        )
+
+        # =====================================================
+        # LOAD STUDENT TRANSFORMER
+        #
+        # Expected Lightning keys:
+        #
+        # model.student....
+        #
+        # Also supports:
+        #
+        # student....
+        # =====================================================
+
+        student_state = {}
+
+        student_prefixes = (
+            "model.student.",
+            "student.",
+        )
+
+        for key, value in checkpoint_state.items():
+            for prefix in student_prefixes:
+                if key.startswith(prefix):
+                    stripped_key = key[len(prefix) :]
+
+                    student_state[stripped_key] = value
+
+                    break
+
+        if not student_state:
+            raise RuntimeError(
+                "Could not find student "
+                "TransformerEncoder weights "
+                "in the JEPA checkpoint."
+            )
+
+        self.student.load_state_dict(
+            student_state,
+            strict=True,
+        )
+
+        print(
+            "Loaded JEPA encoder checkpoint:",
+            checkpoint_path,
+        )
+
+    # =========================================================
+    # FREEZE JEPA
+    # =========================================================
+
+    def _freeze_jepa(
+        self,
+    ) -> None:
+
+        for parameter in self.tubelet_embed.parameters():
+            parameter.requires_grad = False
+
+        for parameter in self.student.parameters():
+            parameter.requires_grad = False
+
+        self.tubelet_embed.eval()
+        self.student.eval()
+
+    # =========================================================
+    # PRESERVE FROZEN JEPA EVAL MODE
+    #
+    # Lightning will call .train() on ActionNet.
+    #
+    # If the JEPA is frozen, keep those modules in eval mode
+    # while the fully connected classifier remains trainable.
+    # =========================================================
+
+    def train(
+        self,
+        mode: bool = True,
+    ):
+
+        super().train(mode)
+
+        if self.freeze_jepa:
+            self.tubelet_embed.eval()
+            self.student.eval()
+
+        return self
+
+    # =========================================================
+    # PREPARE EXISTING ACTION-CLASSIFIER INPUT FOR JEPA
+    # =========================================================
+
+    def _prepare_frames(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+
+        # Expected classifier input:
+        #
+        # [B, 12, 84, 84]
+
+        if x.ndim != 4:
+            raise ValueError(
+                f"ActionNet expected input [B, 12, H, W], got {tuple(x.shape)}"
+            )
+
+        batch_size, channels, height, width = x.shape
+
+        if channels != 12:
+            raise ValueError(
+                "ActionNet expects four stacked RGB "
+                "frames = 12 channels, "
+                f"but got {tuple(x.shape)}"
+            )
+
+        # =====================================================
+        # RESTORE FRAME DIMENSION
+        #
+        # [B, 12, H, W]
+        #
+        # ->
+        #
+        # [B, 4, 3, H, W]
+        # =====================================================
+
+        frames = x.reshape(
+            batch_size,
+            4,
+            3,
+            height,
+            width,
+        )
+
+        # =====================================================
+        # MATCH JEPA GRAYSCALE TRAINING
+        #
+        # [B, 4, 3, H, W]
+        #
+        # ->
+        #
+        # [B, 4, 1, H, W]
+        # =====================================================
+
+        if self.grey_scale:
+            red = frames[
+                :,
+                :,
+                0:1,
+                :,
+                :,
+            ]
+
+            green = frames[
+                :,
+                :,
+                1:2,
+                :,
+                :,
+            ]
+
+            blue = frames[
+                :,
+                :,
+                2:3,
+                :,
+                :,
+            ]
+
+            frames = 0.299 * red + 0.587 * green + 0.114 * blue
+
+        return frames
+
+    # =========================================================
+    # JEPA ENCODER
+    # =========================================================
+
+    def encode(
+        self,
+        frames: torch.Tensor,
+    ) -> torch.Tensor:
+
+        if self.freeze_jepa:
+            with torch.no_grad():
+                tokens = self.tubelet_embed(frames)
+
+                tokens = self.student(tokens)
+
+        else:
+            tokens = self.tubelet_embed(frames)
+
+            tokens = self.student(tokens)
+
+        # =====================================================
+        # HARD REQUIREMENT
+        #
+        # We know this JEPA produces exactly:
+        #
+        # [B, 16, 768]
+        # =====================================================
+
+        expected_shape = (
+            self.num_tokens,
+            self.embed_dim,
+        )
+
+        if tokens.ndim != 3:
+            raise RuntimeError(
+                f"Expected JEPA student output [B, 16, 768], got {tuple(tokens.shape)}"
+            )
+
+        if tuple(tokens.shape[1:]) != expected_shape:
+            raise RuntimeError(
+                "Unexpected JEPA student output. "
+                f"Expected [B, 16, 768], "
+                f"got {tuple(tokens.shape)}"
+            )
+
+        return tokens
+
+    # =========================================================
+    # FORWARD
+    # =========================================================
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+
+        # =====================================================
+        # 1. Convert existing stacked RGB format to JEPA format
+        # =====================================================
+
+        frames = self._prepare_frames(x)
+
+        # frames:
+        #
+        # grayscale:
+        # [B, 4, 1, 84, 84]
+        #
+        # RGB:
+        # [B, 4, 3, 84, 84]
+
+        # =====================================================
+        # 2. PRETRAINED JEPA REPRESENTATION
+        #
+        # No action is provided.
+        # No latent predictor is used.
+        # No ActionEmbedding is used.
+        # No mean pooling is used.
+        #
+        # Output:
+        #
+        # [B, 16, 768]
+        # =====================================================
+
+        tokens = self.encode(frames)
+
+        # =====================================================
+        # 3. CLASSIFY FROM ALL TOKENS
+        #
+        # nn.Flatten inside action_head:
+        #
+        # [B, 16, 768]
+        #
+        # ->
+        #
+        # [B, 12288]
+        #
+        # ->
+        #
+        # [B, 18]
+        # =====================================================
+
+        logits = self.action_head(tokens)
+
+        # =====================================================
+        # 4. PRESERVE OLD ACTIONNET OUTPUT CONTRACT
+        #
+        # Existing ActionTraining expects:
+        #
+        # [B, 1, 18]
+        #
+        # Existing RuntimeActionNet also expects:
+        #
+        # [B, 1, 18]
+        # =====================================================
+
+        logits = logits.unsqueeze(1)
+
+        return logits

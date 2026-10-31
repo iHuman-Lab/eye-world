@@ -2,8 +2,14 @@
 raw_data_path: './data/raw/'
 meta_data_path: './data/raw/meta_data.csv'
 processed_data_path: './data/processed/'
-ckpt_path: '/home/cody/Documents/IHL/eye-world/tb_logs/ms_pacman/vjepa_world_model/version_1/checkpoints/epoch=49-step=164350.ckpt'
+ckpt_path: 'tb_logs/ms_pacman/vjepa_world_model/version_1/checkpoints/epoch=49-step=164350.ckpt'
 action_classifier_checkpoint_dir: 'checkpoints/action_classifier'
+action_classifier_checkpoint: 'checkpoints/action_classifier/space_invaders-action-history-jepa-best.ckpt'
+
+# Gym evaluation (env id follows games[0]; channels follow stack_length/grey_scale)
+gym_eval_episodes: 10
+gym_max_steps: 10000
+gym_record_video: true
 # Pytorch
 epochs: 35
 # Game data
@@ -18,9 +24,11 @@ shuffle: False
 original_size: [210, 160]
 size_x: 84
 size_y: 84
-train_sub: ['R', 'J', 'K']
+train_sub: ['R', 'J']
 test_sub: ['K']
 grey_scale: False
+# Keep 4 for pretraining. The action-conditioned world model builds its own
+# stack_length = context_frames + ac_num_steps (see ac_config in main.py).
 stack_length: 4 # total frames per sample (context + target)
 context_frames: &context_frames 4 # number of frames for student (context); remaining go to teacher
 sigma: 5
@@ -43,6 +51,15 @@ data_writer:
 
 #rollout
 rollout_steps: 12
+
+# Action-conditioned world model (RolloutActionJEPA + ACPredictor)
+ac_num_steps: 8 # future steps per sample; also the predictor's max sequence length
+ac_auto_steps: 2 # steps of the auto-regressive rollout loss
+ac_val_horizon: 8 # rollout length used for validation (<= ac_num_steps)
+ac_dim: 512
+ac_depth: 6
+ac_heads: 8
+ac_lr: 1e-4
 
 use_gaze_for_predictor: false
 use_gaze_for_loss: false
